@@ -1,0 +1,201 @@
+---
+title: "Activity patterns"
+author: "Marie Gilbertson"
+date: "2024-02-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Below, I demonstrate using white-tailed deer movement data to generate 24-hour activity patterns figures. For data ownership reasons, the data is not itself publicly available. However, I will demonstrate the data structure to facilitate replication if readers would like to generate similar figures themselves. In addition, the data can be requested from the Wisconsin Department of Natural Resources.
+
+
+We'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reprodible).
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+##### Clear Environment #####
+remove(list=ls())
+
+
+#### set seed ####
+set.seed(3571)
+
+
+#### load libraries ####
+library(amt)
+library(pbapply)
+library(tidyr)
+library(ggplot2)
+library(MetBrewer)
+library(plyr)
+library(dplyr)
+
+```
+
+
+## Load and preview data
+
+As stated in the introduction, the data itself is not publicly available, but I can give you a preview for replication purposes. 
+
+```{r load-data}
+# load data
+mdat <- get(load("../Project_data/deer_step_data.Rdata"))
+class(mdat)
+
+# preview
+head(mdat)
+
+```
+
+From the preview and data type, we can see that we are working with a "nested_track" object; each row of our mdat object represents a single individual ("id") in a single season ("season") in a single year ("year"). Each entry in the "stp" column then contains a data frame with the movement data for that id/season/year combination. We'll refer to these as **trajectories.** These nested track objects are made with the amt package and can be really useful for managing large movement data sets.
+
+Let's take a look at one of these movement data sets:
+
+```{r preview-movement}
+head(mdat$stp[[1]])
+```
+
+From this preview, we can see what the amt package's track data looks like. Each row represents a "step" with a starting point (x1_ and y1_) and an ending point (x2_ and y2_). Each row then also includes characteristics of that step, including the step length (sl_) and elapsed time (dt_). 
+
+When evaluating activity patterns, we'll look at movement rates by different times of day; we can calculate that by dividing the step length (sl_) by the time elapsed (dt_). The amt package therefore makes it very simple to make these calculations. However, we want to make sure that our fix rates are fairly consistent across time and across individuals. This is because the fix rate can have an impact on the movement rates we calculate. For example, if an animal has very tortuous movement (i.e., very windy), if we take many locations along their windy trajectory, we might calculate a fairly high movement rate. However, if we take very low locations along that trajectory, we might instead calculate quite a low movement rate simply because they don't appear to move very much thanks to their tortuous movement. We therefore want to make sure we have consistent fix rates to avoid introducing bias when calculating movement rates.
+
+This data was previously cleaned using amt functions (track_resample and filter_min_n_burst) to ensure we have consistent, ~4 hour fix rates but we can verify that.
+```{r verify-fix-rates}
+frs <- unlist(lapply(mdat$stp, function(x) mean(as.numeric(x$dt_)))) # take the average fix rate for a trajectory
+summary(frs) # and now look at a summary of the mean fix rates across all trajectories
+```
+
+We see that we have nice, consistent fix rates! Now we can proceed to the activity pattern analysis.
+
+
+## Daily cycles
+
+Our data is in step format, which makes it easy to calculate activity rates, but if we want to look at how activity rates change with a 24 period, we need to assign 24-hour time to each step. Because we don't want hourly activity rates to seem to shift in response to Daylight Saving Time (DST), we'll put all our times in a Central time zone that does not use DST.  
+
+In addition, interpreting activity across hundreds of individuals years worth of data requires some summarizing. Because we were interested in how activity patterns change through the year, we'll summarize activity patterns by averaging hourly movement rates within a given week in the year.  
+
+```{r daily-cycles}
+dc <- mdat %>%
+  mutate(act = lapply(stp, function(x){
+    temp <- x # each x (or "temp" object) represents a single trajectory of movement data (i.e., one individual in one season in one year)
+    
+    # assign Julian day within the focal year (i.e., day number of the year) 
+    temp$origin <- as.Date(paste0(format(temp$t1_, "%Y"), "-01-01"), tz = "America/Chicago") # set Jan 1 of the step's year as the "origin" for calculating Julian date
+    temp$day <- as.Date(temp$t1_, tz = "America/Chicago") # just the date for the step (not the date-time)
+    temp$jday <- NA
+    for(i in 1:nrow(temp)){ # cycle through each row in the trajectory and calculate the Julian date
+      temp$jday[i] <- julian(temp$day[i], origin = temp$origin[i]) +1 # add 1 so that Jan 1 is "day 1"
+    }
+    
+    # assign a week by dividing day number by 7 and rounding down (e.g., day 6 = week 0)
+    temp$week <- floor(temp$jday/7)
+    
+    # now we'll convert times to a time zone that doesn't use DST and extract just the hour 
+    temp$t1_can <- temp$t1_
+    attr(temp$t1_can, "tzone") <- "Canada/Saskatchewan"
+    temp$hour.can <- as.numeric(format(temp$t1_can, "%H")) # hour 
+    temp$met.p.hr <- temp$sl_/as.numeric(temp$dt_) # movement rate in meters per hour
+    return(temp)
+
+  }))
+
+head(dc) # we now have a new tibble with a new column called "act"
+head(dc$act[[1]])
+```
+
+In the preview above, we can see that, within a tractory, we now have columns for week, hour, and movement rate in meters per second. We can use this data to summarize and plot our activity rates.
+
+
+## Summary activity and plot
+
+As described above, to make activity rates interpretable across many individuals and years of data, we'll summarize activity rates by averaging within a calendar week. We can first "unnest" our tibble.
+
+```{r unnest}
+dc <- dc %>%
+  amt::select(id, season, year, act) %>% unnest(cols = act)
+
+head(dc) # we now have a dataframe with all trajectory data merged together
+```
+
+With our merged trajectory data, we can then calculate our averages by week.
+
+```{r weekly-avgs}
+
+all.means <- ddply(dc, .(season, week, hour.can), function(x) mean(x$met.p.hr)) # mean movement rate by season, week, and hour
+all.tots <- ddply(dc, .(season, week, hour.can), function(x) length(unique(x$id))) # sample size (unique individuals) by season, week, and hour
+colnames(all.tots) <- c("season", "week", "hour.can", "unique.n") # update column names for merging
+all.means <- left_join(all.means, all.tots, by = c("season", "week", "hour.can")) # merge the two summaries
+head(all.means)
+
+```
+
+Let's take a look at how many unique individuals contribute to the "mean movement rate" calculations for each season/week/hour.
+
+```{r unique-inds}
+hist(all.means$unique.n)
+```
+
+
+We have a number of observations with very few individuals providing our "average" estimate. That's not really representative, so we'll limit future analysis to only those hours with estimates based on at least 30 unique individuals.
+
+```{r ind-limit}
+all.means <- all.means[all.means$unique.n>=30,]
+```
+
+In addition, some weeks lack data for some hours of the day. Activity patterns aren't very clear if we only have rate estimates for, say, 4 hours in the day. We'll therefore require a given summarized week to have activity rate estimates for at least 12 hours of the day.
+
+```{r hour-limit}
+wk.obs <- ddply(all.means, .(season, week), nrow)
+head(wk.obs)
+wk.obs <- wk.obs[wk.obs$V1>=12,]
+all.means <- all.means[paste0(all.means$season, all.means$week) %in% paste0(wk.obs$season, wk.obs$week),] # extract the weeks that meet our requirements
+```
+
+
+Now that we have our activity rates summarized, we can plot using ggplot.
+
+```{r plot}
+all.means$week.f <- factor(all.means$week) # treat week as a factor
+all.means$season <- factor(all.means$season, levels = c("fa", "pf", "br", "nb")) # control levels of seasons so they plot in order
+
+season.labs <- c("Fawning", "Post-fawning", "Breeding", "Non-breeding") # for nice facet labels
+names(season.labs) <- c("fa", "pf", "br", "nb")
+
+pal <- met.brewer("VanGogh2", 9)[c(4, 2, 1, 9, 6)] # set our color palette
+
+## split non-breeding season into "winter" and "early spring" and create nice legend labels
+all.means$season.col <- as.character(all.means$season)
+all.means$season.col <- ifelse(all.means$week %in% c(4:10), "Winter\n(weeks 4-10)", as.character(all.means$season.col))
+all.means$season.col[all.means$season.col=="nb"] <- "Early spring\n(weeks 11-17)"
+all.means$season.col[all.means$season.col=="fa"] <- "Spring\n(weeks 17-25)"
+all.means$season.col[all.means$season.col=="pf"] <- "Summer-\nearly fall\n(weeks 26-41)"
+all.means$season.col[all.means$season.col=="br"] <- "Fall\n(weeks 41-49)"
+all.means$season.col <- factor(all.means$season.col, levels = c("Spring\n(weeks 17-25)", "Summer-\nearly fall\n(weeks 26-41)", "Fall\n(weeks 41-49)", "Winter\n(weeks 4-10)", "Early spring\n(weeks 11-17)"))
+
+## now plot!
+p <- ggplot(all.means) +
+  geom_path(aes(x = hour.can, y = V1, group = week.f, colour = season.col)) +
+  facet_wrap(~season, labeller = labeller(season = season.labs)) +
+  scale_colour_manual(values = pal, name = "Climatic\nseason") +
+  ylab("Movement rate (meters per hour)") + xlab("Hour of the day") +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11), legend.text = element_text(size = 11),
+        legend.title = element_text(size = 12, face = "bold"), strip.text = element_text(size = 12),
+        legend.spacing.y = unit(0.5, "cm")) +
+  guides(color = guide_legend(byrow = T, override.aes=list(linewidth = 2)))
+
+p
+
+```
+
+And that's it! Each line represents the movement rates averaged across a given week. We can see how deer activity is bimodal, with peaks in the morning and late afternoon. We can also see how activity changes through the seasons.
+
+
+```{r session-info}
+sessionInfo()
+```
+
