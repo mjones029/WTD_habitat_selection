@@ -2,6 +2,11 @@
 title: "Activity patterns"
 author: "Marie Gilbertson"
 date: "2024-02-05"
+knit: (function(inputFile, encoding) {
+      out_dir <- "../Markdown_reports";
+      rmarkdown::render(inputFile,
+                        encoding=encoding,
+                        output_dir=file.path(dirname(inputFile), out_dir))})
 output: html_document
 ---
 
@@ -47,7 +52,7 @@ mdat <- get(load("../Project_data/deer_step_data.Rdata"))
 class(mdat)
 
 # preview
-head(mdat)
+print(head(mdat), width = Inf)
 
 ```
 
@@ -56,7 +61,7 @@ From the preview and data type, we can see that we are working with a "nested_tr
 Let's take a look at one of these movement data sets:
 
 ```{r preview-movement}
-head(mdat$stp[[1]])
+print(head(mdat$stp[[1]]), width = Inf)
 ```
 
 From this preview, we can see what the amt package's track data looks like. Each row represents a "step" with a starting point (x1_ and y1_) and an ending point (x2_ and y2_). Each row then also includes characteristics of that step, including the step length (sl_) and elapsed time (dt_). 
@@ -103,8 +108,8 @@ dc <- mdat %>%
 
   }))
 
-head(dc) # we now have a new tibble with a new column called "act"
-head(dc$act[[1]])
+print(head(dc), width = Inf) # we now have a new tibble with a new column called "act"
+print(head(dc$act[[1]]), width = Inf)
 ```
 
 In the preview above, we can see that, within a tractory, we now have columns for week, hour, and movement rate in meters per second. We can use this data to summarize and plot our activity rates.
@@ -118,7 +123,7 @@ As described above, to make activity rates interpretable across many individuals
 dc <- dc %>%
   amt::select(id, season, year, act) %>% unnest(cols = act)
 
-head(dc) # we now have a dataframe with all trajectory data merged together
+print(head(dc), width = Inf) # we now have a dataframe with all trajectory data merged together
 ```
 
 With our merged trajectory data, we can then calculate our averages by week.
