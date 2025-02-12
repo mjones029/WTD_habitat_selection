@@ -19,7 +19,7 @@ knitr::opts_chunk$set(echo = TRUE)
 Below, I demonstrate using white-tailed deer movement data to generate 24-hour activity patterns figures. For data ownership reasons, the data is not itself publicly available. However, I will demonstrate the data structure to facilitate replication if readers would like to generate similar figures themselves. In addition, the data can be requested from the Wisconsin Department of Natural Resources.
 
 
-We'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reprodible).
+We'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
 
 ```{r, results='hide', message=FALSE, warning=FALSE}
 ##### Clear Environment #####
@@ -38,6 +38,7 @@ library(ggplot2)
 library(MetBrewer)
 library(plyr)
 library(dplyr)
+library(mgcv)
 
 ```
 
@@ -47,8 +48,13 @@ library(dplyr)
 As stated in the introduction, the data itself is not publicly available, but I can give you a preview for replication purposes. 
 
 ```{r load-data}
-# load data
-mdat <- get(load("../Project_data/deer_step_data.Rdata"))
+# load movement data
+mdat <- get(load("../Project_data/SSF_data with covar_4hrstep_24hrslice_reclassed_042123.Rdata"))
+
+# load metadata
+meta <- get(load("../Project_data/metadata_assembled_051022.Rdata"))
+
+# review movement data
 class(mdat)
 
 # preview
@@ -77,11 +83,11 @@ summary(frs) # and now look at a summary of the mean fix rates across all trajec
 We see that we have nice, consistent fix rates! Now we can proceed to the activity pattern analysis.
 
 
-## Daily cycles
+## Exploring daily cycles
 
 Our data is in step format, which makes it easy to calculate activity rates, but if we want to look at how activity rates change with a 24 period, we need to assign 24-hour time to each step. Because we don't want hourly activity rates to seem to shift in response to Daylight Saving Time (DST), we'll put all our times in a Central time zone that does not use DST.  
 
-In addition, interpreting activity across hundreds of individuals years worth of data requires some summarizing. Because we were interested in how activity patterns change through the year, we'll summarize activity patterns by averaging hourly movement rates within a given week in the year.  
+In addition, interpreting activity across hundreds of individuals years worth of data requires some summarizing. Because we were interested in exploring how activity patterns change through the year, we'll summarize activity patterns by averaging hourly movement rates within a given week in the year.  
 
 ```{r daily-cycles}
 dc <- mdat %>%
@@ -115,7 +121,7 @@ print(head(dc$act[[1]]), width = Inf)
 In the preview above, we can see that, within a tractory, we now have columns for week, hour, and movement rate in meters per second. We can use this data to summarize and plot our activity rates.
 
 
-## Summary activity and plot
+## Summary activity and exploratory plotting
 
 As described above, to make activity rates interpretable across many individuals and years of data, we'll summarize activity rates by averaging within a calendar week. We can first "unnest" our tibble.
 
@@ -145,10 +151,10 @@ hist(all.means$unique.n)
 ```
 
 
-We have a number of observations with very few individuals providing our "average" estimate. That's not really representative, so we'll limit future analysis to only those hours with estimates based on at least 30 unique individuals.
+We have a number of observations with very few individuals providing our "average" estimate. That's not really representative, so we'll limit future analysis to only those hours with estimates based on at least 10 unique individuals.
 
 ```{r ind-limit}
-all.means <- all.means[all.means$unique.n>=30,]
+all.means <- all.means[all.means$unique.n>=10,]
 ```
 
 In addition, some weeks lack data for some hours of the day. Activity patterns aren't very clear if we only have rate estimates for, say, 4 hours in the day. We'll therefore require a given summarized week to have activity rate estimates for at least 12 hours of the day.
@@ -170,22 +176,19 @@ all.means$season <- factor(all.means$season, levels = c("fa", "pf", "br", "nb"))
 season.labs <- c("Fawning", "Post-fawning", "Breeding", "Non-breeding") # for nice facet labels
 names(season.labs) <- c("fa", "pf", "br", "nb")
 
-pal <- met.brewer("VanGogh2", 9)[c(4, 2, 1, 9, 6)] # set our color palette
-
 ## split non-breeding season into "winter" and "early spring" and create nice legend labels
 all.means$season.col <- as.character(all.means$season)
-all.means$season.col <- ifelse(all.means$week %in% c(4:10), "Winter\n(weeks 4-10)", as.character(all.means$season.col))
-all.means$season.col[all.means$season.col=="nb"] <- "Early spring\n(weeks 11-17)"
-all.means$season.col[all.means$season.col=="fa"] <- "Spring\n(weeks 17-25)"
-all.means$season.col[all.means$season.col=="pf"] <- "Summer-\nearly fall\n(weeks 26-41)"
-all.means$season.col[all.means$season.col=="br"] <- "Fall\n(weeks 41-49)"
-all.means$season.col <- factor(all.means$season.col, levels = c("Spring\n(weeks 17-25)", "Summer-\nearly fall\n(weeks 26-41)", "Fall\n(weeks 41-49)", "Winter\n(weeks 4-10)", "Early spring\n(weeks 11-17)"))
+all.means$season.col <- ifelse(all.means$season.col=="nb" & all.means$week>=11 & all.means$week<=17, "es", all.means$season.col)
+all.means$season.col <- factor(all.means$season.col, levels = c("fa", "pf", "br", "nb", "es")) # re-level for plotting in the right order
+
 
 ## now plot!
+pal <- met.brewer("VanGogh2", 9)[c(4, 2, 1, 9, 6)] # set our color palette
 p <- ggplot(all.means) +
   geom_path(aes(x = hour.can, y = V1, group = week.f, colour = season.col)) +
   facet_wrap(~season, labeller = labeller(season = season.labs)) +
-  scale_colour_manual(values = pal, name = "Climatic\nseason") +
+  scale_colour_manual(values = pal, name = "Climatic\nseason",
+                      labels = c("Fawning", "Post-\nfawning", "Breeding", "Winter", "Early\nspring")) +
   ylab("Movement rate (meters per hour)") + xlab("Hour of the day") +
   theme_bw() +
   theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11), legend.text = element_text(size = 11),
@@ -197,7 +200,162 @@ p
 
 ```
 
-And that's it! Each line represents the movement rates averaged across a given week. We can see how deer activity is bimodal, with peaks in the morning and late afternoon. We can also see how activity changes through the seasons.
+Each line represents the movement rates averaged across a given week. We can see how deer activity is crepuscular, with peaks in the morning and late afternoon. We can also see how activity changes through the seasons. In particular, we have split up the non-breeding season into two sub-components - winter and early spring - which seems to correspond to some changes in activity behavior.  
+
+From here, we can proceed to statistical modeling.
+
+
+
+## Statistical modeling
+
+To model our diel activity cycles, we'll use generalized additive mixed models (GAMMs). In the accompanying manuscript, we explored various numbers of knots for our GAMMs, but this was fairly time intensive and done with high-throughput computing. Here, we'll just demonstrate fitting one of these models with six knots, which was the best fit.  
+
+Predictors will include season and sex, with season including "winter" and "early-spring," as identified in our exploratory plotting. As described in the manuscript, we'll also include an interaction between season and sex, and use cyclic cubic regression splines, with a separate spline model for each season and sex interaction. Lastly, we'll include random intercepts for individuals.  
+
+First, we'll do some data prep, including breaking our data into training and testing datasets.
+
+```{r pre-gamm}
+
+## join metadata so we can include sex in our model
+dc <- left_join(dc, meta[,c("lowtag", "sex")], by = c("id" = "lowtag"))
+
+
+## Using FULL dataset, not the weekly averaged one
+dc$season_5 <- as.character(dc$season)
+dc$season_5 <- ifelse(dc$season_5=="nb" & dc$week>=11 & dc$week<=17, "es", dc$season_5)
+dc$season_5 <- factor(dc$season_5, levels = c("fa", "pf", "br", "nb", "es")) # re-level for plotting in the right order
+
+
+### train vs test ###
+set.seed(651)
+
+train.ids <- sample(1:nrow(dc), size = floor(0.9*nrow(dc)), replace = F)
+test.ids <- (1:nrow(dc))[!(1:nrow(dc)) %in% train.ids]
+train.dat <- dc[train.ids,]
+test.dat <- dc[test.ids,]
+
+train.dat$id.f <- factor(train.dat$id)
+test.dat$id.f <- factor(test.dat$id)
+
+```
+
+
+Now we can fit our model. However! These models take a long time to fit, so we actually won't run the code below. Instead, I'll actually just load the output from a previous run fitting the model.
+
+```{r fit-gamm, eval=FALSE}
+
+tg <- gamm(met.p.hr ~ season.col * sex + s(hour.can, bs="cc", k = 6, by = interaction(season.col, sex)), random = list(id.f = ~ 1), family = Gamma(link = "log"), data = train.dat, method = "REML")
+
+## save output
+out <- list(tg, train.ids, test.ids)
+names(out) <- c("model", "train.ids", "test.ids")
+
+out.name <- paste0("../Project_data/HT_activity_out_6knots_gamma.Rdata")
+save(out, file = out.name)
+
+```
+
+
+Let's load our model results and review them.
+```{r review-GAMM-results}
+
+## load previously run model output
+mod.list <- get(load("../Project_data/HT_activity_out_6knots_gamma.Rdata"))
+  
+
+tm <- mod.list$model
+tg <- tm$gam
+train.ids <- mod.list$train.ids
+test.ids <- mod.list$test.ids
+rm(mod.list)
+
+## view model output 
+summary(tg)
+ 
+  
+## Predict test data and plot
+test.dat <- dc[test.ids,]
+test.dat$preds <- predict(tg, type = "response", newdata = test.dat)
+test.dat$res <- test.dat$met.p.hr - test.dat$preds
+ggplot(test.dat) +
+  geom_point(aes(x = met.p.hr, y = preds)) +
+  geom_abline(intercept = 0, slope = 1) +
+  xlab("Observed movement rate (m/hr)") + ylab("Predicted movement rate (m/hr") +
+  scale_y_continuous(breaks = seq(0, 150, by = 25)) + scale_x_continuous(breaks = seq(0, 1500, by = 250), limits = c(0, 1500), labels = seq(0, 1500, by = 250)) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11))
+
+```
+
+Our predictions for our hold-out test data aren't outstanding; as described in the manuscript, it looks like our model predictions are tending to be underestimates.  
+
+
+Let's close by plotting our model results with the weekly activity data (this is what's included in the manuscript).
+
+```{r plot-activity-curves-with-model}
+
+## predict across our seasons, sexes, and hours of the day
+season <- factor(c("fa", "pf", "br", "nb", "es"), levels = c("fa", "pf", "br", "nb", "es"))
+sex <- c("Female", "Male")
+hour.can <- seq(0, 23, by = 1)
+pred.dat <- expand.grid(season, sex, hour.can)
+colnames(pred.dat) <- c("season_5", "sex", "hour.can")
+
+tp <- predict(tg, type = "link", newdata = pred.dat, se.fit = T)
+pred.dat$preds <- tp$fit
+pred.dat$se <- tp$se.fit
+pred.dat$pred.resp <- exp(pred.dat$preds)
+pred.dat$lowerCI <- exp(pred.dat$preds - (1.96*pred.dat$se))
+pred.dat$upperCI <- exp(pred.dat$preds + (1.96*pred.dat$se))
+
+
+## re-summarize weekly activity, splitting by sex
+all.means <- ddply(dc, .(sex, season_5, week, hour.can), function(x) mean(x$met.p.hr))
+all.tots <- ddply(dc, .(sex, season_5, week, hour.can), function(x) length(unique(x$id)))
+colnames(all.tots) <- c("sex", "season_5", "week", "hour.can", "unique.n")
+all.means <- left_join(all.means, all.tots, by = c("sex", "season_5", "week", "hour.can"))
+
+all.means <- all.means[all.means$unique.n>=10,]
+
+wk.obs <- ddply(all.means, .(sex, season_5, week), nrow)
+wk.obs <- wk.obs[wk.obs$V1>=12,]
+
+all.means.sub <- all.means[paste0(all.means$sex, all.means$season_5, all.means$week) %in% paste0(wk.obs$sex, wk.obs$season_5, wk.obs$week),]
+all.means.sub$week.f <- factor(all.means.sub$week)
+all.means.sub$season_5 <- factor(all.means.sub$season_5, levels = c("fa", "pf", "br", "nb", "es"))
+
+all.means.sub$group <- paste(all.means.sub$week.f, all.means.sub$sex, sep = "_")
+
+## plot model predictions and observed data together
+pal <- met.brewer("VanGogh2", 9)[c(4, 2, 1, 9, 6)]
+season.labs <- c("Fawning", "Post-fawning", "Breeding", "Non-breeding", "Early Spring")
+names(season.labs) <- c("fa", "pf", "br", "nb", "es")
+
+ggplot() +
+    geom_line(data = all.means.sub, aes(x = hour.can, y = V1, group = group,  color = season_5, linetype = sex), alpha = 0.4) +
+    geom_ribbon(data = pred.dat, aes(x = hour.can, ymin = lowerCI, ymax = upperCI, fill = season_5, group = sex), alpha = 0.5) +
+    geom_line(data = pred.dat, aes(x = hour.can, y = pred.resp, colour = season_5, linetype = sex), linewidth = 1) +
+    facet_wrap(~season_5, labeller = labeller(season_5 = season.labs)) +
+    scale_colour_manual(values = pal, name = "Climatic\nseason", labels = c("Spring (weeks 17-26)", "Summer to early fall\n(weeks 26-41)", "Fall (weeks 41-50)",
+                                                                  "Winter (weeks 50-10)", "Early spring (weeks 11-17)")) +
+    scale_fill_manual(values = pal, name = "Climatic\nseason", labels = c("Spring (weeks 17-26)", "Summer to early fall\n(weeks 26-41)", "Fall (weeks 41-50)",
+                                                                "Winter (weeks 50-10)", "Early spring (weeks 11-17)")) +
+    scale_linetype_discrete(name = "Sex") +
+    ylab("Movement rate (meters per hour)") + xlab("Hour of the day") +
+    theme_bw() + 
+    scale_y_continuous(limits = c(0, 175), breaks = seq(0, 175, by = 25)) +
+    scale_x_continuous(limits = c(0, 24), breaks = seq(0, 24, by = 4)) +
+    theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11), legend.text = element_text(size = 11),
+          legend.title = element_text(size = 12, face = "bold"), strip.text = element_text(size = 12), 
+          legend.spacing.y = unit(0.5, "cm"),
+          legend.position = "inside",
+          legend.position.inside = c(0.85,0.22))
+
+
+```
+
+
+Even though our held-out predictions don't look outstanding, in the broader scope of activity patterns, our model predictions actually look very reasonable. And that's the end!
 
 
 ```{r session-info}
