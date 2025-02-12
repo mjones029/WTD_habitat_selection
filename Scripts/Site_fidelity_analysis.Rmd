@@ -1,0 +1,373 @@
+---
+title: "Site fidelity analysis"
+author: "Marie Gilbertson"
+date: "2025-02-12"
+knit: (function(inputFile, encoding) {
+      out_dir <- "../Markdown_reports";
+      rmarkdown::render(inputFile,
+                        encoding=encoding,
+                        output_dir=file.path(dirname(inputFile), out_dir))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+In this report, I'll demonstrate inter- and intra-annual site fidelity analyses. Site fidelity is quantified based on the Bhattacharyya coefficient between two home ranges: either ranges from the same season but different years (interannual), or ranges between subsequent seasons in the same year (intra-annual).  
+
+Note: Home ranges and Bhattacharyya coefficients are calculated using continuous time movement modeling from the *ctmm* package. Instructions and code for this method are thoroughly documented in the literature, and the code we used is not unique. We recommend interested users review [Silva et al 2021, *Methods in Ecology and Evolution*](https://doi.org/10.1111/2041-210X.13786) in order to apply CTMM methods to their own data. The specific function used to calculate Bhattacharyya coefficients is *overlap()*. 
+
+
+For this report, we'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+##### Clear Environment #####
+remove(list=ls())
+
+
+#### set seed ####
+set.seed(3571)
+
+#### load libraries ####
+library(move)
+library(ggplot2)
+library(ctmm)
+library(lme4)
+library(lmerTest)
+library(glmmTMB)
+library(plyr)
+library(dplyr)
+library(MetBrewer)
+library(ggpubr)
+library(lubridate)
+library(DHARMa)
+```
+
+
+# Interannual site fidelity
+
+We'll start with interannual site fidelity. First, we'll load and preview interannual site fidelity data; note that dispersal events have already been noted in the data, but we still need to remove them.
+
+```{r load-interannual}
+### load and tidy up data ###
+inter <- get(load("../Project_data/site_fidelity_interannual.Rdata"))
+mod.dat <- inter[inter$disp=="no.disp",]
+mod.dat$season <- factor(mod.dat$season, levels = c("fa", "pf", "br", "nb")) # re-level for correct order
+mod.dat <- mod.dat[!is.na(mod.dat$age0),] # remove unknown ages
+
+### preview ###
+head(mod.dat)
+
+```
+
+From the preview, we can see that our data is structured with columns for:  
+
+1. id = individual ID  
+2. season = the season of the home ranges being compared for site fidelity    
+3. year0 = the year of the first home range    
+4. year1 = the year of the second home range    
+5. sex = deer sex    
+6. age0 = age (integer) at the time of the first home range    
+7. ba = Bhattacharyya coefficient    
+8. ud.area0 = area (km^2) of the first home range    
+9. ud.area1 = area (km^2) of the second home range    
+10. disp = did a dispersal occur between the first and second home range?  
+
+
+Let's view the distribution of the data.
+
+```{r view-interannual}
+hist(mod.dat$ba, main = "Histogram of Bhattacharyya coefficients", xlab = "Bhattacharyya coefficient")
+```
+
+We can see that Bhattacharyya coefficient values are limited to between 0 and 1; this necessitates modeling using Beta regression. 
+
+
+### Interannual Beta regression 
+
+We'll prep our data, and then use the *glmmTMB* package to fit Beta regressions to our interannual site fidelity observations. Predictors in our models will include age, sex, season, and the absolute difference between the two home ranges (to control for site fidelity changes resulting simply from variation in home range size). We'll also include random intercepts for individuals. Firstly, we'll want to scale and center our continuous predictors.
+
+```{r interannual-model-prep}
+mod.dat$abs.diff <- abs(mod.dat$ud.area1 - mod.dat$ud.area0)
+mod.dat$abs.diff.sc <- scale(mod.dat$abs.diff)
+mod.dat$age0.sc <- scale(mod.dat$age0)
+```
+
+Next, we'll split our data into training and testing data. 
+
+```{r interannual-train-test}
+set.seed(546516)
+train.ids <- sample(1:nrow(mod.dat), size = floor(0.9*nrow(mod.dat)), replace = F)
+test.ids <- seq(1:nrow(mod.dat))[!seq(1:nrow(mod.dat)) %in% train.ids]
+train <- mod.dat[train.ids,]
+test <- mod.dat[test.ids,]
+```
+
+Now we can fit a set of candidate models to our training data. Note that we are including models for the dispersion parameter.
+
+```{r interannual-fit-models}
+tm0 <- glmmTMB(ba ~ season + (1|id), dispformula = ~ season + sex, train, family=beta_family(link="logit"))
+
+tm1 <- glmmTMB(ba ~ season + sex + age0.sc + (1|id), dispformula = ~ season + sex, train, family=beta_family(link="logit"))
+
+tm2 <- glmmTMB(ba ~ season + age0.sc + sex + abs.diff.sc + (1|id), dispformula = ~ season + sex + as.factor(year0), train, family=beta_family(link="logit"))
+
+tm3 <- glmmTMB(ba ~ season + sex + age0.sc + abs.diff.sc + (1|id), dispformula = ~ season + sex + abs.diff.sc, train, family=beta_family(link="logit"))
+```
+
+Let's compare AIC values for our models.
+
+```{r interannual-aic}
+aics <- AIC(tm0, tm1, tm2, tm3)
+aics[order(aics$AIC),]
+```
+
+It looks like our best supported model is "tm2," but let's review simulated residuals using the *DHARMa* package.
+```{r interannual-DHARMa}
+top.mod <- tm2
+
+sim_res <- DHARMa::simulateResiduals(top.mod, 1000, re.form = NULL)
+plot(sim_res)
+DHARMa::testDispersion(sim_res)
+
+```
+
+These results aren't great. Let's predict our response variable for our hold-out test data, and compare that to the observations.
+```{r interannual-predict-test}
+test$predicted <- predict(top.mod, newdata = test, type = "response", allow.new.levels = T)
+ggplot(test, aes(x = ba, y = predicted)) + 
+  geom_point(aes(colour = sex)) + 
+  scale_color_manual(values = met.brewer("Cassatt1", 4)[c(1,4)], name = "Sex") +
+  geom_abline(slope = 1) +
+  ylim(0,1) + xlim(0,1) +
+  xlab("Observed Bhattacharyya coefficient") + ylab("Predicted Bhattacharyya coefficient") +
+  theme_bw()
+
+```
+
+Again, these results aren't great. I will say that a lot of other trouble shooting went on in the fitting of these models. As reported in the manuscript, it may simply be that beta regression is not ideal for the Bhattacharyya coefficient data.  
+
+Let's take a look at our model results - interpreting them with some caution - and see if some non-parametric tests support our overall conclusions.
+
+```{r interannual-results}
+summary(top.mod)
+
+
+### non-parametric tests ###
+kruskal.test(ba ~ season, data = mod.dat)
+
+wilcox.test(ba ~ sex, data = mod.dat)
+wilcox.test(ba ~ sex, data = mod.dat[mod.dat$ba>0.15,]) # sex effect not solely due to the few males with very low BA (see data figure below)
+
+```
+
+Despite our dodgy model checking, we have pretty solid support for significant relationships between interannual side fidelity and both season and sex. Let's plot the data (included in the manuscript) to see these relationships first-hand.
+
+```{r interannual-data-figure, fig.width=7, fig.height=10}
+mod.dat$season <- factor(mod.dat$season, levels = c("fa", "pf", "br", "nb")) # re-level so they plot in order
+season.pal <- met.brewer("Derain", n= 4)
+season.labs <- c("Fawning", "Post-fawning", "Breeding", "Non-breeding")
+names(season.labs) <- c("fa", "pf", "br", "nb")
+mod.dat$mean.area <- (mod.dat$ud.area0 + mod.dat$ud.area1)/2
+ggplot(mod.dat) +
+  geom_point(aes(x = mean.area, y = ba, colour = season), size = 1.8) +
+  scale_colour_manual(values = season.pal) +
+  facet_grid(season~sex, labeller = labeller(season = season.labs)) +
+  labs(x = bquote('Mean range area'~(km^2)), y = "Bhattacharyya coefficient") +
+  theme_bw() +
+  theme(legend.position = "none", axis.title = element_text(size = 12), axis.text = element_text(size = 11), strip.text = element_text(size = 12))
+
+```
+
+
+# Intra-annual site fidelity
+
+We'll now repeat the same basic analysis for intra-annual site fidelity. In this case, we have quantified site fidelity as the Bhattacharyya coefficient between consecutive seasons in the same year. As with interannual site fidelity, we'll start by loading and previewing our data.
+
+```{r load-intraanual}
+intra <- get(load("../Project_data/site_fidelity_intraannual.Rdata"))
+
+intra$season01 <- factor(intra$season01, levels = c("fa_pf", "pf_br", "br_nb", "nb_fa"))
+mod.dat <- intra[intra$disp=="no.disp",]
+
+
+### preview
+head(mod.dat)
+```
+
+From the data preview, we can see that our data is structured into the following columns:  
+1. id = individual ID  
+2. season0 = season for the first home range being compared  
+3. season1 = season for the second home range  
+4. start1 = starting year of data coverage for the first home range (the non-breeding season starts in Dec and ends in after the new year)  
+5. end1 = ending year of data coverage for the first home range  
+6. start2 = starting year of data coverage for the second home range  
+7. end2 = ending year of data coverage for the second home range  
+8. year.ssf = year of the movement data, as represented in iSSF analysis  
+9. sex = deer sex  
+10. age0 = deer age at time of the first home range  
+11. ba = Bhattacharyya coefficient  
+12. ud.area0 = area (km^2) of the first home range  
+13. ud.area1 = area (km^2) of the second home range  
+14. season01 = combination of the start and end seasons  
+15. area.diff = difference in area between the two ranges  
+16. abs.area.diff = absolute value of the area difference  
+17. disp = did a dispersal occur between the first and second ranges?  
+
+Let's view the distribution of the site fidelity data.
+
+```{r view-intraannual}
+hist(mod.dat$ba)
+```
+
+Again, because the Bhattacharyya coefficient is limited to between 0 and 1, we'll use Beta regressions.
+
+
+### Intra-annual Beta regression 
+
+As in interannual site fidelity analysis, we'll prep our data, including scaling and centering our continuous predictors.
+```{r intraannual-model-prep}
+mod.dat$ba[mod.dat$ba==0] <- 0.001 ## can try converting zeros to very small values to better accommodate the beta regression
+mod.dat$abs.area.diff.sc <- scale(mod.dat$abs.area.diff)
+mod.dat$age0.sc <- scale(mod.dat$age0)
+```
+
+Next, we'll split our data into training and testing datasets.
+```{r intraannual-train-test}
+set.seed(3516)
+train.ids <- sample(1:nrow(mod.dat), size = floor(0.9*nrow(mod.dat)), replace = F)
+test.ids <- seq(1:nrow(mod.dat))[!seq(1:nrow(mod.dat)) %in% train.ids]
+train <- mod.dat[train.ids,]
+test <- mod.dat[test.ids,]
+
+```
+
+And now we can fit some candidate models to our training data.
+```{r intraannual-fit-mods}
+tm0a <- glmmTMB(ba ~ season01 + abs.area.diff.sc + sex + age0.sc + (1 + age0.sc|id), dispformula = ~ season01 + abs.area.diff.sc + sex + age0.sc, train, family=beta_family(link="logit"))
+
+tm1a <- glmmTMB(ba ~ season01 * abs.area.diff.sc + sex + age0.sc + (1 + age0.sc|id), dispformula = ~ season01 + abs.area.diff.sc + sex + age0.sc, train, family=beta_family(link="logit"))
+
+tm2a <- glmmTMB(ba ~ season01 + abs.area.diff.sc * sex + age0.sc + (1 + age0.sc|id), dispformula = ~ season01 + abs.area.diff.sc + sex + age0.sc, train, family=beta_family(link="logit"))
+
+tm3a <- glmmTMB(ba ~ season01* sex + abs.area.diff.sc + age0.sc + (1 + age0.sc|id), dispformula = ~ season01* sex + abs.area.diff.sc  + age0.sc, train, family=beta_family(link="logit"))
+
+tm4a <- glmmTMB(ba ~ season01* sex + abs.area.diff.sc + age0.sc*sex + (1 + age0.sc|id), dispformula = ~ season01 + sex + abs.area.diff.sc + age0.sc, train, family=beta_family(link="logit"))
+
+tm5a <- glmmTMB(ba ~ season01* sex + abs.area.diff.sc + age0.sc*sex + (1 + age0.sc|id), dispformula = ~ season01 * sex + abs.area.diff.sc + age0.sc, train, family=beta_family(link="logit"))
+
+tm6a <- glmmTMB(ba ~ season01* sex + age0.sc*sex + season01*age0.sc + abs.area.diff.sc + (1 + age0.sc|id), dispformula = ~ season01 + sex + abs.area.diff.sc + age0.sc, train, family=beta_family(link="logit"))
+
+```
+
+Let's check out our AIC values for these models.
+```{r intraannual-aic}
+aicsa <- AIC(tm0a, tm1a, tm2a, tm3a, tm4a, tm5a, tm6a)
+aicsa <- aicsa[order(aicsa$AIC),]
+aicsa$delta <- aicsa$AIC - aicsa$AIC[1]
+aicsa
+```
+
+It looks like model "tm4a" is best supported, but "tm5a" and "tm6a" are equivalent by a ∆2 AIC standard. Let's check out our simulated residuals with the *DHARMa* package.
+
+```{r intraannual-DHARMa}
+top.mod <- tm4a
+sim_res <- DHARMa::simulateResiduals(top.mod, 1000, re.form = NULL)
+plot(sim_res)
+DHARMa::testDispersion(sim_res)
+```
+
+As with interannual site fidelity, this looks pretty dodgy. Let's check out predictions for our hold-out testing dataset.
+
+```{r intraannual-predict-test, warning=FALSE}
+test$predicted <- predict(top.mod, newdata = test, type = "response", allow.new.levels = T)
+ggplot(test, aes(x = ba, y = predicted)) + 
+  geom_point(aes(colour = sex)) + 
+  scale_color_manual(values = met.brewer("Cassatt1", 4)[c(1,4)], name = "Sex") +
+  geom_abline(slope = 1) +
+  xlim(0,1) + ylim(0,1) +
+  xlab("Observed Bhattacharyya coefficient") + ylab("Predicted Bhattacharyya coefficient") +
+  theme_bw()
+
+```
+
+These predictions also don't look outstanding, but - like interannual site fidelty - checking out the data itself supports some general conclusions. Again, it seems like Beta regression just doesn't handle this response variable very well.  
+
+Our model results look like this:
+```{r intraannual-results}
+summary(top.mod)
+
+```
+
+And let's take a look at the data itself:
+
+```{r intraannual-data-figure, fig.height=9, fig.width=10}
+
+season.pal <- met.brewer("Derain", n= 4)
+sex.pal <-   met.brewer("Cassatt1", 4)[c(1, 4)]
+mod.dat$season01 <- factor(mod.dat$season01, levels =  c("fa_pf", "pf_br", "br_nb", "nb_fa")) # re-level to make sure plots in the right order
+
+## site fidelity by season
+p <- ggplot(mod.dat) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "darkgrey") +
+  geom_jitter(aes(x = season01, y = ba, colour = sex), position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.6), alpha = 0.4) +
+  geom_boxplot(aes(x = season01, y = ba, colour = sex), fill = "transparent", width = 0.3, position = position_dodge(width = 0.6), outlier.shape = NA, linewidth = 0.7) + 
+  scale_colour_manual(values = sex.pal) +
+  ylab("Bhattacharyya coefficient") + xlab("Season") +
+  scale_x_discrete(labels = c("fa_pf" = "Fa-PF", "pf_br" = "PF-Br", "br_nb" = "Br-NB", "nb_fa" = "NB-Fa")) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11), plot.title = element_blank(), 
+        legend.position = "none")
+
+
+
+
+## site fidelity by absolute difference in home range area
+sn.labs <- data.frame(label = c("Fawning%->%`Post-fawning`", "`Post-fawning`%->%Breeding", "Breeding%->%`Non-breeding`", "`Non-breeding`%->%Fawning"),
+                      season01 = c("fa_pf", "pf_br", "br_nb", "nb_fa"))
+mod.dat <- left_join(mod.dat, sn.labs, by = "season01")
+head(mod.dat)
+mod.dat$label <- factor(mod.dat$label, levels =  c("Fawning%->%`Post-fawning`", "`Post-fawning`%->%Breeding", "Breeding%->%`Non-breeding`", "`Non-breeding`%->%Fawning"))
+
+px <- pretty(mod.dat$abs.area.diff)
+p2 <- ggplot(mod.dat) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "darkgrey") +
+  geom_point(aes(x = abs.area.diff, y = ba, colour = sex)) +
+  scale_colour_manual(values = sex.pal, name = "Sex") +
+  ylab("Bhattacharyya coefficient") + xlab(bquote('Absolute difference in range area' ~(km^2))) +
+  # facet_wrap(~label, labeller = label_parsed)+
+  scale_x_continuous(limits = range(px), breaks = px) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11), plot.title = element_blank(),
+        strip.text = element_text(size = 12), legend.title = element_text(size = 12, face = "bold"), legend.text = element_text(size = 11),
+        legend.position = "none")
+
+## site fidelity by age
+p3 <- ggplot(mod.dat) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "darkgrey") +
+  geom_jitter(aes(x = age0, y = ba, colour = sex), position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.6)) +
+  scale_colour_manual(values = sex.pal, name = "Sex") +
+  scale_x_continuous(breaks = seq(0, 17, by=2), labels = c("<1", 2, 4, 6, 8, 10, 12, 14, 16)) +
+  ylab("Bhattacharyya coefficient") + xlab("Age (years)") +
+  facet_wrap(~sex, scales = "free_x")+
+  theme_bw() +
+  theme(axis.title = element_text(size = 12), axis.text = element_text(size = 11), plot.title = element_blank(),
+        strip.text = element_text(size = 12), legend.title = element_text(size = 12, face = "bold"), legend.text = element_text(size = 11),
+        legend.position = "bottom")
+
+
+
+## put them all together 
+p.12 <- ggarrange(p, p2, nrow = 1, labels = c("A", "B"))
+p.123 <- ggarrange(p.12, p3, ncol = 1, labels = c("", "C"))
+p.123
+```
+
+Lastly, some session info:
+```{r session-info}
+sessionInfo()
+```
