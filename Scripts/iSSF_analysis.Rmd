@@ -1,0 +1,437 @@
+---
+title: "Integrated step selection function analysis"
+author: "Marie Gilbertson"
+date: "2025-02-14"
+knit: (function(inputFile, encoding) {
+      out_dir <- "../Markdown_reports";
+      rmarkdown::render(inputFile,
+                        encoding=encoding,
+                        output_dir=file.path(dirname(inputFile), out_dir))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+# Introduction
+
+In this report, I'll demonstrate the approach we used to fit integrated step selection functions (iSSFs). This will include calculating rolling occurrence distributions for neighboring individuals, and using these as time-varying habitat covariates.  
+
+In the manuscript for this work, we fit thousands of iSSFs across several "model types." This is too computationally intensive for an RMarkdown report, so I will just demonstrate rolling occurrence distributions and iSSF fitting for a single indivual. This approach is readily scaled up through looping and/or parallelization.  
+
+I will also demonstrate calculating log-relative selection strength (log-RSS) values and fitting a meta-analysis model with log-RSS as the response variable. Again, we fit many of these models across various model types and iSSF predictors, so I will just demonstrate on a small scale. Again, scaling up is readily accomplished through looping and/or parallelization.  
+
+Note: I am not including the movement data preparation that occurs prior to simulating random steps and extracting covariates. This is well documented in the documentation for the *amt* package, and our code for this is not novel.  
+
+For this report, we'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+##### Clear Environment #####
+remove(list=ls())
+
+
+#### set seed ####
+set.seed(9846)
+
+
+#### load libraries ####
+library(plyr)
+library(dplyr)
+library(adehabitatLT)
+library(amt)
+library(raster)
+library(ggplot2)
+library(tidyverse)
+library(lubridate)
+library(pbapply)
+library(sf)
+library(ggpubr)
+library(lmerTest)
+library(lme4)
+library(terra)
+
+```
+
+
+
+## Rolling occurrence distributions
+
+Our methods here were based on [Schlägel et al 2019](https://doi.org/10.1111/2041-210X.13235), *Methods in Ecology and Evolution.  
+
+For each focal individual, we calculated rolling occurrence distributions (ODs) for their neighboring conspecifics. Each set of rolling ODs could then be included as an independent, time-varying covariate in iSSFs.  
+
+The *amt* package includes a function for calculating rolling ODs, rolling_od(). This function calculates an occurrence distribution from a "slice" of movement data, using a consistent number of locations for each slice. For our study, however, we wanted to use a consistent period of time for each "slice" to account for the potential for missing data or changes in the frequency of locations. 
+
+We therefore made modifications to the rolling_od() function, creating our own rolling_od_tw() function for calculating rolling ODs based on temporal windows for each slice, rather than the number of points. Interested users should review the help file for the original rolling_od() function for further info about arguments.
+
+```{r roll-od-fx}
+rolling_od_tw <- function(
+    x, trast, model = fit_ctmm(x, "bm"), res.space = 1, res.time = 10,
+    n.hrs = 160, show.progress = TRUE) {
+  
+  res <- list()
+  last <- max(x$t_)
+  last.slice <- last-(n.hrs*60*60)
+  diffs <- difftime(last.slice, x$t_, units = "hours")
+  
+  if (show.progress){
+    pb <- utils::txtProgressBar(style = 3, max = max(which(diffs>=0)), min = 1)
+  } 
+  
+  if(class(x)[1]!="track_xyt"){stop("Data must by of class 'track_xyt'")}
+  
+  start.time <- x$t_[1]
+  end.time <- start.time + (n.hrs*60*60)
+  slice.times <- .POSIXct(character(length = max(which(diffs>=0))))
+  coverage <- data.frame(matrix(nrow = max(which(diffs>=0)), ncol = 3))
+  colnames(coverage) <- c("first", "last", "n.pts")
+  j <- 1
+  repeat{
+    if (show.progress) utils::setTxtProgressBar(pb, j)
+    temp <- x[x$t_>=start.time & x$t_<=end.time,]
+    temp$nxt.time <- NA
+    temp$tdiff <- NA
+
+    # only estimate OD for this slice if there are at least 4 points
+    if(nrow(temp)>=4){
+      ## remove locations so that all locations have at least 15 minutes between them
+      # do iteratively to minimize data loss
+      temp.new <- temp[1,]
+      for(k in 2:nrow(temp)){
+        # print(k)
+        td <- rbind(temp.new, temp[k,])
+        td$nxt.time <- c(NA, paste(td$t_[1:(nrow(td)-1)]))
+        td$tdiff <- difftime(td$t_, as.POSIXct(td$nxt.time, tz = "America/Chicago"), units = "mins")
+        
+        if(td$tdiff[nrow(td)]<15){
+          temp.new <- td[-(nrow(td)),]
+        }else{
+          temp.new <- td
+        }
+      }
+      temp <- subset(temp.new, select = -c(nxt.time, tdiff))
+      
+      if(nrow(temp)>=4){
+        suppressWarnings(res[[j]] <- od(temp, trast = trast, model = model,
+                                      res.space = res.space, res.time = res.time))
+        # store metadata that only applies when an OD can be fit
+        coverage$first[j] <- paste(head(temp$t_,1))
+        coverage$last[j] <- paste(tail(temp$t_,1))
+        
+      }else{
+        res[[j]] <- NA
+        coverage$first[j] <- coverage$last[j] <- NA
+        
+      }
+
+    }else{
+      res[[j]] <- NA
+      coverage$first[j] <- coverage$last[j] <- NA
+    }
+   
+    # store additional metadata
+    slice.times[j] <- end.time
+    coverage$n.pts[j] <- nrow(temp)
+    
+    # update for next iteration
+    j <- j+1
+    start.time <- x$t_[j]
+    end.time <- start.time + (n.hrs*60*60)
+    # if new end time is beyond the range of data, break loop
+    if(end.time > max(x$t_)) break
+  }
+  
+  res2 <- res[which(!is.na(coverage$first))]
+  res <- rast(res2)
+  terra::time(res) <- slice.times[which(!is.na(coverage$first))]
+  attr(time(res), "tzone") <- "America/Chicago" ## make sure time zone is correct
+  out <- list(res, coverage)
+  names(out) <- c("res", "coverage")
+  return(out)
+}
+
+```
+
+
+I'll now demonstrate using this function with movement data from one deer over a three month period. Let's first load some data and check out the data structure.  
+
+```{r load-od-data}
+od.dat <- get(load("../Project_data/od_roll_demo_data.Rdata"))
+head(od.dat)
+```
+
+Let's extract just three months of data over which to calculate our rolling ODs.
+```{r extract-months}
+od.dat <- od.dat[od.dat$date>="2017-03-01" & od.dat$date<"2017-06-01",]
+range(od.dat$date)
+nrow(od.dat)
+
+```
+
+Now we'll go ahead and use our custom rolling OD function to calculate the ODs. We'll use "slices" of movement data that are 24 hours in duration.  
+
+```{r roll-ods}
+## We can set arguments externally when scaling up to evaluate an array of different slice durations
+slice.hrs <- 24
+
+# convert to track object
+dat1 <- od.dat %>% make_track(x, y , date, id = id, crs = 3071) # make sure to use the appropriate coordinate reference system (CRS)
+
+# make a template raster with a sizeable buffer
+box <- data.frame(st_coordinates(amt::bbox(dat1, buffer = 3000))) # bounding box with 3km buffer
+
+trast <- rast(xmin = min(box$X), xmax = max(box$X), 
+              ymin = min(box$Y), ymax = max(box$Y), 
+              res = 30, crs = "epsg:3071") # 30 meter resolution and make sure to set CRS
+trast[] <- 1 # set values to 1
+
+
+od_roll_tw <- rolling_od_tw(dat1, trast, model = fit_ctmm(dat1, "bm"), n.hrs = slice.hrs, res.space = 1, show.progress = F)
+writeRaster(od_roll_tw$res, filename = "../Project_data/od_roll_demo_roll.tif", overwrite = T)
+```
+
+
+
+We can use the animate() function to check out how the rolling OD looks over time. This doesn't work very well in an RMarkdown report, so we'll just show a handful of the resulting OD rasters over time.  
+
+```{r}
+od_roll_rast <- od_roll_tw$res
+animate(od_roll_rast[[20:30]])
+```
+
+
+
+Exporting a raster stack of OD results then allows us to treat these like any other time-varying habitat covariate in an iSSF. We can see what that looks like in the next section.
+
+
+## Random steps and extract covariates
+
+Step-by-step tutorials for fitting and interpreting iSSFs are available from [Signer et al. 2019](https://doi.org/10.1002/ece3.4823) and [Fieberg et al. 2021](https://doi.org/10.1111/1365-2656.13441). **We strongly recommend interested users start with these resources.**  
+
+Before fitting an iSSF, we need to draw random steps for each observed step and then extract habitat covariates for observed and random steps. As outlined in the above resources, the *amt* package has functions for managing each of these steps. 
+
+We'll demonstrate this process with movement data from one individual, and we'll focus on the same three-month window we used for our OD roll demo:
+
+```{r}
+ssf.dat <- get(load("../Project_data/ssf_demo_movement_data.Rdata"))
+ssf.dat <- ssf.dat[ssf.dat$date>="2017-03-01" & ssf.dat$date<"2017-06-01",]
+head(ssf.dat)
+```
+
+
+First, we need to make this into a "track" object. While we're only evaluating one individual, when evaluating many individuals, it's very useful to store data in a nested tibble, so I'll demonstrate that as well. We also need to add some metadata, so we'll load that data and merge it into the tibble for this focal individual.
+
+```{r ssf-data-prep}
+
+## add a season for nested tibble demonstration purposes
+ssf.dat$season <- "demo"
+dt1 <- ssf.dat %>% make_track(.x = x, .y = y, .t = date, id = id, season = season,  crs = 3071)
+
+## make into a nested tibble to make movement data easier to manage
+dt2 <- dt1 %>% nest(data = c(-"id", -"season"))
+
+## load and merge metadata
+meta <- get(load("../Project_data/metadata_assembled_051022.Rdata"))
+dt2 <- left_join(dt2, meta[,c("lowtag", "sex")], by = c("id" = "lowtag"))
+
+
+## view data
+dt2
+head(dt2$data[[1]])
+```
+
+Our "dt2" nested tibble is kind of like a data frame of data frames, and makes it really easy to keep large collections of different data and tables organized.  
+
+Next, we need to make sure our movement data is at regular intervals. Sometimes GPS collars will be on different schedules, depending on the season, but this can affect results in iSSFs. *amt* has important functions for reviewing the sampling rate of movement data and resampling that data to make sure the sampling rate is consistent. The most common fix rate in our study was one location every 4 hours, so we'll use that as our target sampling rate.  
+
+A couple notes: I'll make some plots below for reviewing fix rates (the number of hours between fixes). These are not very interesting plots when reviewing one individual, but are really useful when working with data for many individuals. I therefore include them as a reference for scaling this workflow up. In addition, our demo individual already has regular relocations, but I'm including the resampling steps for demo purposes.
+
+```{r}
+
+### distribution of sampling rate intervals ###
+review <- dt2 %>% mutate(sr = lapply(data, summarize_sampling_rate, time_unit = "hour")) %>%
+  amt::select(id, season, sr) %>% unnest(cols = sr)
+## plot mean hours between fixes by individual
+ggplot(review, aes(x = as.factor(id), y  = mean)) + xlab("ID") + ylab("Mean sampling rate") + geom_point()
+## plot median hours between fixes by individual
+ggplot(review, aes(x = as.factor(id), y  = median)) + xlab("ID") + ylab("Median sampling rate") + geom_point()
+
+
+### resample and filter locations to common fix rate ###
+dt3 <- dt2 %>% 
+  mutate(resamp = lapply(data, function(x){
+    x %>% amt::track_resample(rate = hours(4), tolerance = minutes(20)) %>%
+      amt::filter_min_n_burst(min_n = 3)}))
+
+# double check that the resampling worked as expected
+review2 <- dt3 %>% mutate(sr = lapply(resamp, summarize_sampling_rate, time_unit = "hour")) %>%
+  amt::select(id, season, sr) %>% unnest(cols = sr)
+# all trajectories should have a median fix rate of ~4 hours
+ggplot(review2, aes(x = as.factor(id), y  = median)) + xlab("ID") + ylab("Median sampling rate") + geom_point()
+```
+
+We now have a regularized movement data set. However, we can occasionally see relocations that result in a step length of zero. iSSFs in *amt* cannot accommodate a step length of zero, and these are also likely erroneous - GPS collars really aren't accurate enough to get a step length of precisedly zero. We therefore want to check for an remove any consecutive duplication locations (i.e., step lengths of zero) before we proceed. I do this with a few custom functions that count, identify, and remove step lengths of zero. Note: our demo individual does not have any of these zero step lengths (it's really not a common problem), but I include it here for demonstration purposes because it is problematic on the rare instances when it does occur.
+
+```{r step-length-zero}
+## function for counting the number of zero step lengths
+nostep_num <- function(x){
+  xs1 <- x$x_[1:(nrow(x)-1)]
+  xs2 <- x$x_[2:nrow(x)]
+  xsd <- xs2 - xs1 
+  xs0 <- which(xsd==0)
+  
+  ys1 <- x$y_[1:(nrow(x)-1)]
+  ys2 <- x$y_[2:nrow(x)]
+  ysd <- ys2 - ys1
+  ys0 <- which(ysd==0)
+  
+  if(length(xs0)>0 & length(ys0)>0){
+    out <- length(as.numeric(xs0[which(xs0==ys0)]+1)) # want the second occasion with the identical consecutive location
+  }else{
+    out <- 0
+  }
+  return(out)
+}
+
+## function that outputs the index of any zero step lengths
+nostep_id <- function(x){
+  xs1 <- x$x_[1:(nrow(x)-1)]
+  xs2 <- x$x_[2:nrow(x)]
+  xsd <- xs2 - xs1 
+  xs0 <- which(xsd==0)
+  
+  ys1 <- x$y_[1:(nrow(x)-1)]
+  ys2 <- x$y_[2:nrow(x)]
+  ysd <- ys2 - ys1
+  ys0 <- which(ysd==0)
+  
+  if(length(xs0)>0 & length(ys0)>0){
+    out <- as.numeric(xs0[which(xs0==ys0)]+1) # want the second occasion with the identical consecutive location
+  }else{
+    out <- NA
+  }
+  return(out)
+}
+
+## function that removes any step lengths of zero
+remove_nostep <- function(x){
+  xs1 <- x$x_[1:(nrow(x)-1)]
+  xs2 <- x$x_[2:nrow(x)]
+  xsd <- xs2 - xs1 
+  xs0 <- which(xsd==0)
+  
+  ys1 <- x$y_[1:(nrow(x)-1)]
+  ys2 <- x$y_[2:nrow(x)]
+  ysd <- ys2 - ys1
+  ys0 <- which(ysd==0)
+  
+  if(length(xs0)>0 & length(ys0)>0){
+    rem <- as.numeric(xs0[which(xs0==ys0)]+1) # want the second occasion with the identical consecutive location
+    out <- x[-rem,]
+  }else{
+    out <- x
+  }
+  
+  return(out)
+}
+
+# max number of duplicated steps in a seasonal trajectory (this is a fairly rare problem) - none, in this instance
+max(unlist(lapply(dt3$resamp, nostep_num))) 
+# datasets that have a duplicate consecutive location (step length = 0) - none, in this instance
+which(is.na(unlist(lapply(dt3$resamp, nostep_id)))==F) 
+# index of the second location (the repeated one that should be removed) - none, in this instance
+inds <- unlist(lapply(dt3$resamp, nostep_id)) 
+
+
+# remove the repeated location
+dt4 <- dt3 %>%
+  mutate(norep = lapply(resamp, function(x){
+    x %>% remove_nostep
+  }))
+max(unlist(lapply(dt4$norep, nostep_num))) # check that it worked (this will stay at zero in our demo because there weren't any zero step lengths in the first place)
+
+```
+
+
+We are now ready to convert our "clean" movement data from points to steps.
+
+```{r points-to-steps}
+
+#### convert from points to steps ####
+ds1 <- dt4 %>%
+  mutate(stp = lapply(norep, function(x){
+    # re-run filtering because we may have removed some locations in the zero step length processing
+    x %>% amt::filter_min_n_burst(min_n = 3) %>%
+      amt::steps_by_burst()
+  }))
+
+## view data
+ds1
+head(ds1$stp[[1]])
+```
+
+Now that our data is in step format, we can do the key steps of drawing random steps and extracting our covariates. I'm going to demonstrate this with two "static" habitat covariates, elevation and distance to nearest forest edge, and one time-varying habitat covariate. For the time-varying habitat covariate, we'll use the rolling OD I demonstrated above, as that individual has some habitat overlap with our current focal individual. Again, *amt* has great functions for streamlining this whole process.
+
+```{r random-steps-covariates, warning=FALSE}
+## extract step data from our nested tibble (can readily scale this up by looping through each "stp" table in ds1)
+step.dat <- ds1$stp[[1]]
+
+## draw 10 random steps
+set.seed(96513) # set seed for reproducibility paranoia
+step.dat <- step.dat %>%
+    random_steps(n_control = 10)
+
+
+### load static landscape variables (elevation and distance to forest edge)
+## elevation
+ele <- rast(get(load("../Project_data/elevation.Rdata"))) # originally made as a "raster" object
+names(ele) <- "ele"
+
+## distance to forest edge
+fe <- rast(get(load("../Project_data/distance_to_forest_edge_raster.Rdata")))
+
+### extract static landscape variables
+step.dat_statcov <- step.dat %>%
+  extract_covariates(ele, where = "end") %>%
+  extract_covariates(fe, where = "end")
+
+
+### load time-varying covariate (OD roll)  
+od_roll_demo <- rast("../Project_data/od_roll_demo_roll.tif")
+# check and correct time zone if needed (it may be converted to UTC times in the saving/loading process; definitely check with your own data)
+attr(time(od_roll_demo), "tzone") <- "UTC"
+attr(time(od_roll_demo), "tzone") <- "America/Chicago"
+
+
+## extract as a time-varying covariate
+step.dat_allcov <- step.dat_statcov %>% 
+  extract_covariates_var_time(od_roll_demo, max_time = hours(2), when = "any", 
+                              where = "end",
+                              name_covar = "neighbor1")
+
+print(head(step.dat_allcov), width = Inf)
+print(tail(step.dat_allcov), width = Inf)
+
+```
+
+We see that we have some missing observations for overlap with the OD roll neighbor. This is because our OD roll doesn't start until 3/2/2017, so no rasters in our OD roll raster stack are within the 2 hour "max time" we've specified in the extract_covariates_var_time() function.  
+
+These are just a few examples of covariate extraction, but this can be scaled up/modified for addition habitat covariates, including ones that vary in time. Once we've extracted all our habitat covariates, we can move on to the actual iSSF fitting.
+
+
+## Fitting an iSSF
+
+Demo fitting one iSSF
+
+
+## Log-RSS calculation
+
+Demo calculating log-RSS for one of the covariates (but point to the paper and amt package info)
+
+
+## Meta-analysis approach
+
+Demo fitting a statistical model to log-RSS data.0
