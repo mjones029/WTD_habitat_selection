@@ -1,0 +1,233 @@
+---
+title: "Used-habitat calibration plots"
+author: "Marie Gilbertson"
+date: "2025-03-03"
+knit: (function(inputFile, encoding) {
+      out_dir <- "../Markdown_reports";
+      rmarkdown::render(inputFile,
+                        encoding=encoding,
+                        output_dir=file.path(dirname(inputFile), out_dir))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this report, I'll demonstrate adapting the approach described by [Fieberg et al. 2017](https://doi.org/10.1111/ecog.03123) for validating step-selection models: used-habitat calibration (UHC) plots.  
+
+Commenting will at times seem somewhat minimal. This is done to encourage users to refer to the [original code](http://doi.org/10.13020/D6T590) published by Fieberg et al. Their documentation is excellent. **Both the Fieberg et al. publication and code should be reviewed prior to using the code in this report.**    
+
+In the manuscript associated with this report, we fit individual-level integrated step selection functions (iSSFs) for thousands of trajectories. Replicating this for an RMarkdown report is not practical, so I'll demonstrate our approach at a smaller scale.  
+
+We'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+##### Clear Environment #####
+remove(list=ls())
+
+
+#### set seed ####
+set.seed(1654)
+
+
+#### load libraries ####
+library(plyr)
+library(dplyr)
+library(amt)
+library(ggplot2)
+library(tidyverse)
+library(lubridate)
+library(sf)
+
+```
+
+
+
+## Load data
+
+Data prepped for iSSF fitting; one individual, same season, different years. Scaling/centering of predictors already done; levels of habitat covariates are identical between training and testing data sets.
+
+```{r}
+
+uhc.demo.dat <- get(load("../Project_data/UHC_demo_data.Rdata"))
+train <- uhc.demo.dat$train
+test <- uhc.demo.dat$test
+
+print(head(train), width = Inf)
+print(head(test), width = Inf)
+
+
+```
+
+
+```{r}
+
+uhc_sim.strat <- function (nsims, xmat, stratum, fit_ssf, z) {
+  xmat <- xmat[,-1] #remove intercept
+  ustrat <- unique(stratum)
+  nstrat <- length(ustrat)
+  x_sim_choice <- array(NA, dim = c(nsims, nstrat, ncol(z)))
+  beta.hats <- MASS::mvrnorm(nsims, coef(fit_ssf), fit_ssf$model$var)
+  ntot.test <- nrow(xmat)
+  dimxmat <- ncol(xmat)
+  tempdat <- as.data.frame(cbind(1:nrow(xmat), stratum, z))
+  names(tempdat)[1] <- "inds"
+  for (i in 1:nsims) {
+    lp.hat.s <- as.matrix(xmat) %*% beta.hats[i, ]
+    tempdat$wx.s <- exp(lp.hat.s)
+    tempdat.g <- tempdat %>% group_by(stratum)
+    x_sim_choice[i, , ] <- z[sample_n(tempdat.g, 1, weight = wx.s)$inds, 
+    ]
+  }
+  return(x_sim_choice)
+}
+
+uhc_dens <- function (rand_sims, dat, avail, gridsize = 500) {
+  rand_sims <- as.matrix(rand_sims)
+  dat <- as.matrix(dat)
+  avail <- as.matrix(avail)
+  alldat <- c(rand_sims, dat, avail)
+  range.x <- c(min(alldat), max(alldat))
+  nsims <- nrow(rand_sims)
+  densrand <- matrix(NA, nsims, gridsize)
+  densdat <- KernSmooth::bkde(as.vector(dat), range.x = range.x, 
+                              gridsize = gridsize)
+  for (i in 1:nsims) {
+    temp <- KernSmooth::bkde(rand_sims[i, ], range.x = range.x, 
+                             gridsize = gridsize)
+    densrand[i, ] <- temp$y
+  }
+  densavail <- KernSmooth::bkde(as.vector(avail), range.x = range.x, 
+                                gridsize = gridsize)
+  out <- list(densdat = densdat, densrand = densrand, densavail = densavail)
+  return(out)
+}
+
+```
+
+
+
+```{r}
+
+### fit model(s) to training data
+mod.formula <- as.formula(paste(
+    "case_ ~ 
+    log_sl_ + cos.ang + 
+    poly(eastness, 2, raw = TRUE) + northness + 
+    log_fe.dist + 
+    flu_end4*ndvi_end + strata(step_id_)",
+    collapse = " "
+  ))
+
+
+training.mod <- train %>% fit_issf(mod.formula, model = T)
+  
+  
+
+### run simulations with test data and training model
+## keep only the rows in mdat.test that are also in the design matrix 
+## (need to remove rows with missing data)
+ 
+na.cols <- which(apply(test[,c("sl_", "ta_", "flu_end4", "ndvi_end", "eastness", "northness", "fe.dist")], 2, 
+                       function(x) sum(is.na(x))) !=0)
+na.dat <- test[,c("sl_", "ta_", "flu_end4", "ndvi_end", "eastness", "northness", "fe.dist")][, na.cols]
+
+na.rows <- unique(unlist(apply(na.dat, 2, function(x) which(is.na(x)))))
+mdat.test <- test[-c(na.rows),]
+
+
+design.mat.test.full <- model.matrix(mod.formula, data=mdat.test)
+strata.mat <- design.mat.test.full[,grepl("strata", colnames(design.mat.test.full))]
+design.mat.test.full <- design.mat.test.full[,!grepl("strata", colnames(design.mat.test.full))]
+
+z.col <- colnames(design.mat.test.full)
+z.col <- z.col[!grepl("Intercept|sl_|ang", z.col)]
+z <- model.matrix(mod.formula, 
+                  data = mdat.test)
+z <- z[,which(colnames(z) %in% z.col)]
+
+
+
+uniq.strat <- sub(".*=", "", colnames(strata.mat))
+reps.strat <- colSums(strata.mat)
+strata.vec <- rep(uniq.strat, reps.strat)
+strata.vec <- as.numeric(c(rep("1", nrow(z) - length(strata.vec)), strata.vec))
+  
+xchoice.full <- NA
+xchoice.full <- uhc_sim.strat(nsims = 100,
+                            xmat = design.mat.test.full, 
+                            stratum = strata.vec, 
+                            fit_ssf = training.mod,
+                            z = z)
+
+  
+
+
+  
+variables <- colnames(z)
+v <- which(variables=="log_fe.dist")
+
+denshats.full <- uhc_dens(rand_sims=xchoice.full[,,v],
+                          dat=z[mdat.test$case_,v],
+                          avail=z[!mdat.test$case_,v], gridsize = 2000)
+    
+
+    
+xs <- denshats.full$densdat$x
+
+obs.y <- denshats.full$densdat$y
+avl.y <- denshats.full$densavail$y
+
+low.s <- apply(denshats.full$densrand, 2, quantile, prob = 0.025, na.rm = TRUE)
+up.s <- apply(denshats.full$densrand, 2, quantile, prob = 0.975, na.rm = TRUE)
+
+pol <- st_sfc(st_polygon(list(cbind(c(xs, rev(xs), xs[1]),c(up.s, rev(low.s), up.s[1])))))
+obs.line <- st_sfc(st_linestring(matrix(c(xs, obs.y), ncol = 2)))
+avl.line <- st_sfc(st_linestring(matrix(c(xs, avl.y), ncol = 2)))
+
+
+obs.o.length <- st_length(obs.line)
+avl.o.length <- st_length(avl.line)
+
+obs.c.line <- st_intersection(obs.line, pol)
+avl.c.line <- st_intersection(avl.line, pol)
+
+
+obs.c.length <- st_length(obs.c.line)
+avl.c.length <- st_length(avl.c.line)
+
+if(any(unlist(lapply(obs.c.line[[1]], function(x) any(class(x)=="POINT"))))){
+  obs.c.line <- obs.c.line[[1]][-which(unlist(lapply(obs.c.line[[1]], function(x) any(class(x)=="POINT"))))]
+  obs.c.line <- st_sfc(obs.c.line)
+}
+if(any(unlist(lapply(avl.c.line[[1]], function(x) any(class(x)=="POINT"))))){
+  avl.c.line <- avl.c.line[[1]][-which(unlist(lapply(avl.c.line[[1]], function(x) any(class(x)=="POINT"))))]
+  avl.c.line <- st_sfc(avl.c.line)
+}
+
+obs.prop <- obs.c.length/obs.o.length
+avl.prop <- avl.c.length/avl.o.length
+
+
+pol.df <- data.frame(st_coordinates(pol))
+obs.line.df <- data.frame(st_coordinates(obs.line))
+avl.line.df <- data.frame(st_coordinates(avl.line))
+obs.c.line.df <- data.frame(st_coordinates(obs.c.line))
+avl.c.line.df <- data.frame(st_coordinates(avl.c.line))
+
+  
+ggplot() + 
+  geom_polygon(data = pol.df, aes(x = X, y = Y), fill = "grey") +
+  geom_path(data = obs.line.df, aes(x = X, y = Y), linetype = "dashed") + 
+  geom_path(data = avl.line.df, aes(x = X, y = Y), color = "red", linetype = "dashed") +
+  geom_path(data = obs.c.line.df, aes(x = X, y = Y, group = L1)) + geom_path(data = avl.c.line.df, aes(x = X, y = Y, group = L1), color = "red") +
+  ggtitle(paste0("Log(Distance to forest edge)", ": ", "observed in = ", round(obs.prop, 2), "; available in = ", round(avl.prop, 2))) +
+  theme_bw() +
+  xlab("Scaled log(Distance to forest edge)") + ylab("Density")
+  
+   
+
+```
