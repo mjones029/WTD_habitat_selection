@@ -22,9 +22,9 @@ In this report, I'll demonstrate the approach we used to fit integrated step sel
 
 In the manuscript for this work, we fit thousands of iSSFs across several "model types." This is too computationally intensive for an RMarkdown report, so I will just demonstrate rolling occurrence distributions and iSSF fitting for a single indivual. This approach is readily scaled up through looping and/or parallelization.  
 
-I will also demonstrate calculating log-relative selection strength (log-RSS) values and fitting a meta-analysis model with log-RSS as the response variable. Again, we fit many of these models across various model types and iSSF predictors, so I will just demonstrate on a small scale. Again, scaling up is readily accomplished through looping and/or parallelization.  
+I will also demonstrate calculating log-relative selection strength (log-RSS) values for fitting meta-analysis models, where log-RSS is the response variable. Again, we fit many models across various model types and iSSF predictors, so I will just demonstrate on a small scale. Scaling up is readily accomplished through looping and/or parallelization.  
 
-Note: I am not including the movement data preparation that occurs prior to simulating random steps and extracting covariates. This is well documented in the documentation for the *amt* package, and our code for this is not novel.  
+Note: I am not including the movement data preparation that occurs prior to simulating random steps and extracting covariates. This is well described in the documentation for the *amt* package, and our code for this is not novel.  
 
 For this report, we'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
 
@@ -48,7 +48,6 @@ library(tidyverse)
 library(lubridate)
 library(pbapply)
 library(sf)
-library(ggpubr)
 library(lmerTest)
 library(lme4)
 library(terra)
@@ -59,7 +58,7 @@ library(terra)
 
 ## Rolling occurrence distributions
 
-Our methods here were based on [Schlägel et al 2019](https://doi.org/10.1111/2041-210X.13235), *Methods in Ecology and Evolution.  
+Our methods here were based on [Schlägel et al 2019](https://doi.org/10.1111/2041-210X.13235), *Methods in Ecology and Evolution*.  
 
 For each focal individual, we calculated rolling occurrence distributions (ODs) for their neighboring conspecifics. Each set of rolling ODs could then be included as an independent, time-varying covariate in iSSFs.  
 
@@ -72,6 +71,7 @@ rolling_od_tw <- function(
     x, trast, model = fit_ctmm(x, "bm"), res.space = 1, res.time = 10,
     n.hrs = 160, show.progress = TRUE) {
   
+  ## Basic setup steps
   res <- list()
   last <- max(x$t_)
   last.slice <- last-(n.hrs*60*60)
@@ -88,6 +88,8 @@ rolling_od_tw <- function(
   slice.times <- .POSIXct(character(length = max(which(diffs>=0))))
   coverage <- data.frame(matrix(nrow = max(which(diffs>=0)), ncol = 3))
   colnames(coverage) <- c("first", "last", "n.pts")
+  
+  ## loop through the time series of the data until you get to the end
   j <- 1
   repeat{
     if (show.progress) utils::setTxtProgressBar(pb, j)
@@ -144,6 +146,7 @@ rolling_od_tw <- function(
     if(end.time > max(x$t_)) break
   }
   
+  ## assign the corresponding time stamps to each slice and return the final output
   res2 <- res[which(!is.na(coverage$first))]
   res <- rast(res2)
   terra::time(res) <- slice.times[which(!is.na(coverage$first))]
@@ -195,7 +198,7 @@ writeRaster(od_roll_tw$res, filename = "../Project_data/od_roll_demo_roll.tif", 
 
 
 
-We can use the animate() function to check out how the rolling OD looks over time. This doesn't work very well in an RMarkdown report, so we'll just show a handful of the resulting OD rasters over time.  
+We can use the animate() function to check out how the rolling OD looks over time. This doesn't work very well in an RMarkdown report, so we'll just show a handful of the resulting OD rasters over time. The values (and colors) of the plotted rasters represent the probability an indivual occurred in that location during the given time slice.   
 
 ```{r}
 od_roll_rast <- od_roll_tw$res
@@ -273,7 +276,7 @@ review2 <- dt3 %>% mutate(sr = lapply(resamp, summarize_sampling_rate, time_unit
 ggplot(review2, aes(x = as.factor(id), y  = median)) + xlab("ID") + ylab("Median sampling rate") + geom_point()
 ```
 
-We now have a regularized movement data set. However, we can occasionally see relocations that result in a step length of zero. iSSFs in *amt* cannot accommodate a step length of zero, and these are also likely erroneous - GPS collars really aren't accurate enough to get a step length of precisedly zero. We therefore want to check for an remove any consecutive duplication locations (i.e., step lengths of zero) before we proceed. I do this with a few custom functions that count, identify, and remove step lengths of zero. Note: our demo individual does not have any of these zero step lengths (it's really not a common problem), but I include it here for demonstration purposes because it is problematic on the rare instances when it does occur.
+We now have a regularized movement data set. However, we can occasionally see relocations that result in a step length of zero. iSSFs in *amt* cannot accommodate a step length of zero, and these are also likely erroneous - GPS collars really aren't accurate enough to get a step length of precisely zero. We therefore want to check for and remove any consecutive duplication locations (i.e., step lengths of zero) before we proceed. I do this with a few custom functions that count, identify, and remove step lengths of zero. Note: our demo individual does not have any of these zero step lengths (it's really not a common problem), but I include it here for demonstration purposes because it is really annoying on the rare instances when it does occur.
 
 ```{r step-length-zero}
 ## function for counting the number of zero step lengths
@@ -419,19 +422,205 @@ print(tail(step.dat_allcov), width = Inf)
 
 We see that we have some missing observations for overlap with the OD roll neighbor. This is because our OD roll doesn't start until 3/2/2017, so no rasters in our OD roll raster stack are within the 2 hour "max time" we've specified in the extract_covariates_var_time() function.  
 
-These are just a few examples of covariate extraction, but this can be scaled up/modified for addition habitat covariates, including ones that vary in time. Once we've extracted all our habitat covariates, we can move on to the actual iSSF fitting.
+These are just a few examples of covariate extraction, but this can be scaled up/modified for additional habitat covariates, including ones that vary in time.  
+
+Because we're going to fit iSSFs, we'll also want to include some movement variables; in this case, log-step length and cos(turning angle). We can do that here.
+```{r log-cos}
+
+step.dat_allcov$log_sl_ <- log(step.dat_allcov$sl_)
+step.dat_allcov$cos_ta_ <- cos(step.dat_allcov$ta_)
+
+```
+
+
+
+Once we've extracted all our habitat and movement covariates, we can move on to the actual iSSF fitting.
 
 
 ## Fitting an iSSF
 
-Demo fitting one iSSF
+For simplicity, I'll just demo fitting a very simple iSSF. Guidance - including code - is readily available through the Signer et al. and Fieberg et al. papers linked above. Interested users should start with these resources to ensure they understand the fundamentals before building their own models.  
+
+As in the accompanying manuscript, we'll start by scaling and centering some of our continuous covariates. In the manuscript, we scaled and centered based on population-level values for our covariates; since we're just working with one individual here, we'll scale and center based on individual-level values.
+
+```{r scale-center}
+## Scale and center
+step.dat_allcov$log_sl_.sc <- scale(step.dat_allcov$log_sl_)
+step.dat_allcov$cos_ta_.sc <- scale(step.dat_allcov$cos_ta_)
+step.dat_allcov$ele.sc <- scale(step.dat_allcov$ele)
+step.dat_allcov$fe.dist.sc <- scale(step.dat_allcov$fe.dist)
+```
+
+
+For the very simple iSSF we're fitting, we can just use the fit_issf() function that's part of the *amt* package. However, in our manuscript, we fit several variations of iSSFs to each movement trajectory. In situations like this, writing a function to select from several different model formulations can be helpful. I'll demo that here.
+
+```{r fit-mods-function}
+
+## Fit mods function
+fit.mods <- function(try.neighs = FALSE, 
+                     neighs = NULL, ## a list of neighbor "names"; i.e., the column names for neighbors
+                     ssf.data = ste.dat_allcov, 
+                     snow = FALSE){
+  
+  ## what to include in the model formula if a snow covariate is included
+  if(snow){
+    snow.ins <- "poly(snow_end, 3, raw = TRUE) + "
+  }else{
+    snow.ins <- ""
+  }
+  
+  ## what to include in the model formula if neighbors are being included (accounts for not knowing how many neighbors will be included)
+  if(try.neighs){
+    neighs <- paste(neighs, sep = " ", collapse = " ")
+    neighs <- gsub(" ", " + ", neighs)
+    neighs <- paste(neighs, " + ", collapse = " ")
+  }else{
+    neighs <- ""
+  }
+
+  ## construct the model formula
+  model.formula <- as.formula(paste(
+    "case_ ~ 
+    log_sl_.sc + cos_ta_.sc + 
+    fe.dist.sc + 
+    poly(ele.sc, 2, raw = TRUE) + ", 
+    snow.ins, neighs, "strata(step_id_)",
+    collapse = " "
+  ))
+  
+  
+  
+  ## attempt to fit the model; return an NA result if model fails
+  mod <- tryCatch({
+    ssf.data %>% fit_issf(model.formula, model = T)
+  }, warning=function(w) {
+    
+    ## do something about the warning, maybe return 'NA'
+    # message("handling warning no mod: ", conditionMessage(w))
+    NA
+  }, error = function(err){
+    # message("handling error no mod: ", conditionMessage(err))
+    NA
+  })
+  
+    
+  ## output the results
+  mod.out <- list(mod, ssf.data)
+  names(mod.out) <- c("model", "ssf.data")
+  return(mod.out)
+ 
+}
+
+```
+
+Now that we have our model fitting function, we can try to fit a model. We'll fit a version including "neighbor1" as a time-varying habitat covariate to test for selection or avoidance of this individual.
+
+```{r fit-issf}
+## extract the column names associated with our "neighbor" covariates
+neighbors <- colnames(step.dat_allcov)[grepl("neighbor", colnames(step.dat_allcov))]
+
+## fit a model; we're not including snow cover, so we'll set that to FALSE
+demo.issf <- fit.mods(try.neighs = T, neighs = neighbors, ssf.data = step.dat_allcov, snow = FALSE)
+
+## extract and review results
+summary(demo.issf$model)
+
+```
+
+And now we have a fitted model! This is, of course, a fairly simple model, but shows how we can begin to scale up, efficiently try different model types, and fit models for many different trajectories. 
 
 
 ## Log-RSS calculation
 
-Demo calculating log-RSS for one of the covariates (but point to the paper and amt package info)
+When evaluating the results of iSSFs, we can't just look at the covariate estimates: we need to consider log-relative selection strength (log-RSS). For thorough explanation of log-RSS - what these values are and how to calculate them - please read [Avgar et al. 2017](https://doi.org/10.1002/ece3.3122). **This is really required reading for interpreting habitat- and step-selection results.** 
 
+The *amt* package comes with a built in function for calculating log-RSS values based on fitted models. However, we must provide this function with data frames representing a single hypothetical reference location (x2), and one or more alternative locations (x1).  
+
+Let's look at the log-RSS for varying levels of (scaled and centered) forest edge distance. We can start by setting a reference location (x2). We need to include all the variables (with appropriate names) from our fitted model; because most of our continuous covariates were scaled and centered, when we set them to zero, we're setting them to their average values. We didn't scale and center the neighbor covariate, so this is just representing a location where the neighbor wasn't present.
+
+```{r logrss-forest-x2}
+x2 <- data.frame(
+  log_sl_.sc = 0,
+  cos_ta_.sc = 0,
+  fe.dist.sc = 0,
+  ele.sc = 0,
+  neighbor1 = 0
+)
+```
+
+
+Now we can create our x1 data frame, representing a selection of "alternative" locations. We just want to see the effect of forest edge distance, so that's the only value we'll alter. 
+
+```{r logrss-forest-x1}
+x1 <- data.frame(
+  log_sl_.sc = 0,
+  cos_ta_.sc = 0,
+  fe.dist.sc = seq(-1, 5, by = 0.5), # range is based on the range of observed values
+  ele.sc = 0,
+  neighbor1 = 0
+)
+
+```
+
+We can now feed these into the log_rss() function and plot our results.
+
+```{r logrss-forest-plot}
+forest.lrss <- log_rss(demo.issf$model, x1 = x1, x2 = x2)
+forest.lrss <- forest.lrss$df
+head(forest.lrss)
+
+ggplot(forest.lrss, aes(x = fe.dist.sc_x1, y = log_rss)) +
+  geom_hline(yintercept = 0, colour = "grey", linetype = "dashed") +
+  geom_path() + 
+  xlab("Distance to forest edge (scaled and centered)") + ylab("Log-RSS") +
+  theme_bw()
+```
+  
+    
+Note: for simple additive effects like this, the slope of the line in the above figure corresponds to the covariate estimate from the fitted iSSF (in this case, 0.33).  
+
+Things are more complicated for other kinds of models terms. As an example, we'll look at elevation, which was modeled as a second order polynomial. This is where you **definitely** should read the Avgar et al. paper linked above, as this structure makes log-RSS sensitive to habitat values.  
+
+We'll leave x2 the same, but now we'll vary elevation for our alternative locations (x1).
+
+```{r logrss-ele-x1}
+x1 <- data.frame(
+  log_sl_.sc = 0,
+  cos_ta_.sc = 0,
+  fe.dist.sc = 0, 
+  ele.sc = seq(-2, 2, 0.2), # range is based on the range of observed values
+  neighbor1 = 0
+)
+
+ele.lrss <- log_rss(demo.issf$model, x1 = x1, x2 = x2)
+ele.lrss <- ele.lrss$df
+head(ele.lrss)
+
+ggplot(ele.lrss, aes(x = ele.sc_x1, y = log_rss)) +
+  geom_hline(yintercept = 0, colour = "grey", linetype = "dashed") +
+  geom_path() + 
+  xlab("Elevation (scaled and centered)") + ylab("Log-RSS") +
+  theme_bw()
+```
+
+After calculating our log-RSS values, we can make these the response variables in meta-analyses to understand how factors like sex and season affect habitat selection. 
 
 ## Meta-analysis approach
 
-Demo fitting a statistical model to log-RSS data.0
+A population-level approach to fitting iSSFs (e.g., [Muff et al. 2019](https://doi.org/10.1111/1365-2656.13087)) is generally preferable over a meta-analysis of individual-level models. However, when including neighbors, all individuals have a different suite of neighbors, so a population-level approach doesn't work. Instead, we'll use the log-RSS values for our different covariates from above as response variables in "meta-analysis" models.  
+
+We might, for example, test how selection for proximity to forest edges varies with factors like season and sex. These models are no different from your standard regression analyses; if you have repeated observations for individuals, you can fit mixed effect models to account for that kind of correlated data. These regression methods are standard in R, so I won't do a full demo here. However, let's say we have a data frame called "log.rss.data", with columns for (1) log-RSS for elevation, *log.RSS.elevation*, (2) season, (3) sex, and (4) indiviaul ID, *ID*. Fitting a linear mixed model could look something like this:
+```{r meta-example, eval=FALSE}
+meta.model <- lmer(log.RSS.elevation ~ season * sex + (1|ID), data = log.rss.data)
+```
+
+In the above example, we'd be fitting a linear mixed effects model with log-RSS values for elevation as the response variable, and an interaction between season and sex as fixed effects. The model also includes random intercepts for individual. 
+
+
+## Closing
+
+And that's it! I'll just close with some session info. All of the packages loaded were not necessarily used to create this report, but they were necessary for scaling up this work to many individuals or performing the full meta-analysis, so I've included them here for completeness. 
+
+```{r session-info}
+sessionInfo()
+```
