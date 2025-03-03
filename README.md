@@ -7,7 +7,7 @@ Where possible, I have included code as RMarkdown scripts with HTML outputs so u
 
 1. Intra- and inter-annual site fidelity analysis: **Site_fidelity_analysis**
 2. Activity pattern analysis: **Activity_patterns**
-3. iSSF fitting and meta-analysis, including rolling occurrence distributions for neighbors
+3. iSSF analysis, including rolling occurrence distributions for neighbors: **iSSF_analysis**
 4. Used-habitat calibration plots
 5. Encounter distribution analysis
 
