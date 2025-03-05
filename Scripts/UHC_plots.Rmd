@@ -209,12 +209,13 @@ xchoice.full <- uhc_sim.strat(nsims = 100,
 
 Our simulations fundamentally give us the predicted distributions of our habitat covariates for used test data points. We now need to compare that to the observed distribution for that same data. A "well calibrated" model should have the observed distribution falling within the predicted distribution. Furthermore, we can compare the distribution for available points within the test dataset. If the observed versus available distributions are quite different, this can be suggestive of that habitat covariate being an important predictor.  
 
-For the purpose of this demonstration, I will just show this process with one of our habitat covariates: log-transformed distance to the nearest forest edge ("log_fe.dist"). We'll start by generating the kernel density estimate from our simulated data, and extraction the 95% simulation envelope. 
+For the purpose of this demonstration, I will just show this process with one of our habitat covariates: log-transformed distance to the nearest forest edge ("log_fe.dist"). We'll start by generating the kernel density estimate from our simulated data, and extract the 95% simulation envelope. 
 
 ```{r}
 variables <- colnames(z)
 v <- which(variables=="log_fe.dist")
 
+## kernel density estimate from simulated data
 denshats.full <- uhc_dens(rand_sims=xchoice.full[,,v],
                           dat=z[mdat.test$case_,v],
                           avail=z[!mdat.test$case_,v], gridsize = 2000)
@@ -294,7 +295,7 @@ ggplot() +
   
 ```
 
-We can see that the observed (black line) largely falls within the simulation envelope (which is supported by the quantification that ~95% is in the envelope). In controls, only 27% of the available (red dashed line) distribution falls within the simulation envelope. This suggests that the model is well calibrated (at least for this habitat covariate), and that forest edge distance is likely an important covariate.  
+We can see that the observed (black line) largely falls within the simulation envelope (which is supported by the quantification that ~95% is in the envelope). In contrast, only 27% of the available (red dashed line) distribution falls within the simulation envelope. This suggests that the model is well calibrated (at least for this habitat covariate), and that forest edge distance is likely an important covariate.  
 
 
 ## Conclusion
