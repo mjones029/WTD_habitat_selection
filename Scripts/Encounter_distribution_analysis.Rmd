@@ -1,0 +1,132 @@
+---
+title: "Encounter distribution analysis"
+author: "Marie Gilbertson"
+date: "2025-03-10"
+knit: (function(inputFile, encoding) {
+      out_dir <- "../Markdown_reports";
+      rmarkdown::render(inputFile,
+                        encoding=encoding,
+                        output_dir=file.path(dirname(inputFile), out_dir))})
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this report, I'll demonstrate the general workflow for our analysis of encounter distributions. Encounter distributions are described in [Noonan et al. 2021](https://doi.org/10.1111/2041-210X.13597) *Methods in Ecology and Evolution.* They represent a probability distribution for the locations at which individuals were most likely to have encountered each other. We calculated seasonal encounter distributions for pairs of deer, and then evaluated the habitat composition of these distributions. Our aim was to determine if some habitats are are more favorable for encounters, depending on deer sex and season.
+
+
+To demonstrate our approach, I'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+##### Clear Environment #####
+remove(list=ls())
+
+
+#### set seed ####
+set.seed(4651)
+
+
+#### load libraries ####
+library(terra)
+library(sf)
+library(ctmm)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+```
+
+
+## Encounter distribution estimation
+
+The approach - including code - for estimating encounter distributions is thoroughly documented in [Noonan et al. 2021](https://doi.org/10.1111/2041-210X.13597). Furthermore, the methods are easily implemented in R with the *ctmm* package; in particular, the encounter() function. We therefore direct interested users to these resources; referring to the original sources is important for ensuring users understand the underlying methods before applying them to their own data. Nothing in our approach was novel, as we closely followed the code provided by Noonan et al.
+
+## Extract land use within encounter distributions
+
+We will proceed by demonstrating how to extract land use classifications from within an identified encounter distribution. First, let's load an example encounter distribution:
+
+```{r load-CDE}
+## Example CDE
+cde <- get(load("../Project_data/cdeout_5002_5833_2017_fa.Rdata")) 
+cde <- cde$CDE # object I originally created is a list, including data; we just want the encounter distribution (CDE) itself
+plot(cde)
+
+```
+
+Let's extract just the 95% isopleth from this encounter distribution.
+
+```{r isopleth, message=FALSE}
+
+vert <- SpatialPolygonsDataFrame.UD(cde, level.UD = 0.95, level = 0.95)
+vert.e <- vert[2,] # extract estimate (rather than confidence intervals)
+poly.sf <- st_as_sf(vert.e)
+
+ggplot(poly.sf) +
+  geom_sf() + theme_bw()
+
+```
+
+
+Now, let's read in some static landscape data. We'll use level-1 land use classifications from [Wiscland2](https://data-wi-dnr.opendata.arcgis.com/documents/wi-dnr::wiscland-2/about?path=). These are fairly coarse land use classifications (though we simplified even further in our manuscript), but give a relevant example of the workflow.
+
+
+```{r load-landscape}
+wl <- rast("../Project_data/WiscLand2_level1.tif")
+class(wl)
+plot(wl)
+```
+
+I know that my land cover and movement data are in the same coordinate reference system (CRS). However, interested users should always ensure this with their own data, especially if they are downloading landscape data from different sources.  
+
+The area covered by our Wiscland2 habitat raster is very large. Let's crop it down so we can see our encounter distribution polygon in context.
+```{r crop-WL}
+wl.cde <- crop(wl, ext(buffer(vert.e, 1000)))
+
+## we can plot to review
+wl.df <- as.data.frame(wl.cde, xy = T)
+
+ggplot() +
+  theme_bw() + geom_raster(data = wl.df, aes(x = x, y = y, fill = as.factor(layer))) +
+  scale_fill_manual(values = c("1000" = "grey", "2000" = "gold", "3000" = "green3", "4000" = "green4", "6000" = "aquamarine3"), name = "Habitat",
+                    labels = c("Developed", "Agiculture", "Grassland", "Forest", "Wetland")) +
+  geom_sf(data = poly.sf, fill = "transparent", colour = "black", linewidth = 1)
+
+```
+
+We can see that this encounter distribution is primarily composed of forest, agriculture, and grassland. Let's go ahead and extract the habitat values within the encounter distribution.
+
+
+```{r extract-habitat, warning=FALSE}
+c <- extract(wl.cde, poly.sf, xy = T)
+head(c)
+nrow(c)
+
+## plot to check
+ggplot() +
+  theme_bw() + geom_raster(data = c, aes(x = x, y = y, fill = as.factor(layer))) +
+  scale_fill_manual(values = c("1000" = "grey", "2000" = "gold", "3000" = "green3", "4000" = "green4", "6000" = "aquamarine3"), name = "Habitat",
+                    labels = c("Developed", "Agiculture", "Grassland", "Forest", "Wetland")) +
+  geom_sf(data = poly.sf, fill = "transparent", colour = "black", linewidth = 1)
+
+```
+
+The extract() function produces a data frame with the land use classification for each cell that falls within our polygon of interest. If we want to eventually model the proportions of different habitat types in encounter distributions, we can extract the counts and proportions here:
+
+```{r counts-props}
+counts <- data.frame(table(c$layer))
+props <- data.frame(prop.table(table(c$layer)))
+
+props
+
+```
+
+These proportions are what we can then use as response variables to determine how habitat in encounter distributions varies by season and deer sex.
+
+
+## Spatial GAMs
+
+< demo fitting binary and continuous models for one of the three habitat types >
