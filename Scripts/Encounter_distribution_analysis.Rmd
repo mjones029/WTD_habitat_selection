@@ -38,6 +38,7 @@ library(plyr)
 library(dplyr)
 library(ggplot2)
 library(mgcv)
+library(ggpubr)
 ```
 
 
@@ -129,4 +130,179 @@ These proportions are what we can then use as response variables to determine ho
 
 ## Spatial GAMs
 
-< demo fitting binary and continuous models for one of the three habitat types >
+We'll now use our "proportion land use type" as a response variable in models aiming to determine how the habitat composition of encounter distributions varies with factors like deer sex and season. I'll start by loading a full dataset; this dataset includes some information we don't need, so I'll extract just the relevant columns.  
+
+Some column names are self-explanatory, but others less so:  
+
+X1/X2 = IDs of the two individuals that are part of a given encounter distribution  
+
+sex.d = Sexes of the pair (FF, MF, or MM)  
+
+age.diff = difference in ages of the pair (in integer years)  
+
+cent.x/cent.y = x and y coordinates of the encounter distribution centroid  
+
+ba = Bhattacharyya coefficient between the seasonal home ranges of the pair (quantifies home range overlap)  
+
+area.km.95 = area of the 95% isopleth of the encounter distribution  
+
+p.corn, etc = proportion of the encounter distribution classified as a given habitat type  
+
+
+```{r load-cde-dat}
+#### load data ####
+cde <- get(load("../Project_data/spatial_models_rd3_082423.Rdata"))
+cde <- cde[,c("X1", "X2", "year", "season", "sex.d", "age.diff", "cent.x", "cent.y", "ba", "area.km.95", "p.central.hardwoods", "p.corn", "p.grass.past", "p.hay", "p.oak", "p.other", "p.soybean")]
+head(cde)
+```
+
+
+We expect there to be some spatial autocorrelation in the composition of encounter distributions. Encounter distributions that are close to each other (e.g., because one individual is part of multiple encounter distributions) are more likely to have similar habitat compositions than those that are far apart. We therefore need to fit models that can account for this spatial autocorrelation. In the manuscript for this work, we used spatial Generalized Additive Models (GAMs). I'm going to walk through fitting GAMs for one of our habitat types: agricultural land use. We'll have to combine a few agricultural land use classes into one "coarse" agriculture class. Let's do this and take a look at the resulting data:
+
+```{r view-ag}
+cde$p.ag <- cde$p.corn + cde$p.hay + cde$p.soybean
+
+ggplot(cde, aes(x = p.ag)) + 
+  geom_histogram(colour = "white", binwidth = 0.05) +
+  xlab("Proportion agricultural") + ylab("Count") +
+  theme_bw()
+```
+
+We can see that we have quite a lot of encounter distributions that entirely lack agricultural land use - even when we combine corn, hay, and soybeans into one class. Our data is "zero inflated," and this can make it a challenge to fit some statistical models. Our approach in the manuscript was to model our data in two parts: a binary presence/absence part, and a continuous proportion part (given presence).  
+
+In addition, we found that our models performed better when we excluded encounter distributions where there was very little home range overlap between the pair, as quantified by the Bhattacharyya coefficient. Let's go ahead and exclude encounter distributions with a Bhattacharyya coefficient ≤ 0.1, and create a new binary "is agricultural land use present or not" column.
+
+```{r}
+# remove individuals based on BA threshold
+cde.ba <- cde[cde$ba>0.1,]
+
+
+# binary responses for ag and grass/pasture
+cde.ba$ag.bin <- ifelse(cde.ba$p.ag>0, 1, 0)
+
+```
+
+
+Before we fit our models, we need to do a little bit more data wrangling. We'll re-adjust the levels of our seasons and remove individuals with missing data. We'll scale and center our continuous predictor (age difference). We also need to rescale our centroids - these will feature in our model, and their large values can make models do funky things. 
+
+```{r}
+
+# adjust the order of the seasons
+cde.ba$season <- factor(cde.ba$season, levels = c("fa", "pf", "br", "nb"))
+
+# remove individuals missing ages
+cde.ba <- cde.ba[!is.na(cde.ba$age.diff),]
+
+# scale and center ages
+cde.ba$age.diff.sc <- scale(cde.ba$age.diff)
+
+
+# re-scale centroid coordinates
+cde.ba$x <- cde.ba$cent.x/(10e4)
+cde.ba$y <- cde.ba$cent.y/(10e4)
+
+```
+
+
+Next, we'll split our data into training and testing data. We'll fit our two models (binary and continuous) to the training data, and then review our model performance with the test data.
+
+```{r}
+# training versus testing datasets
+set.seed(250) # for reproducibility
+training.ids <- sample(1:nrow(cde.ba), size = floor(0.9*nrow(cde.ba)), replace = F) # 90% training
+test.ids <- seq(1:nrow(cde.ba))[!seq(1:nrow(cde.ba)) %in% training.ids] # remaining 10% for testing
+
+test <- cde.ba[test.ids,]
+train <- cde.ba[training.ids,]
+```
+
+
+Now that we have our data all set up, we can start by fitting our first GAM. We'll do the binary model first. This will use ALL the data in our training set, and the response variable is 0/1 for absence or presence of agriculture in encounter distributions, respectively. We account for spatial patterns in the data with the s() term in the model. The gam.check() function gives us some info for checking our model, and is part of how we arrived at the number of knots (k = 150, here) we used.  
+
+```{r}
+
+### Binary spatial GAM
+tal <- gam(ag.bin ~ season + sex.d + age.diff.sc + s(x, y, bs="gp", k =150), family = binomial(link = "logit"), data = train, method = "REML")
+par(mfrow = c(2,2))
+gam.check(tal)
+par(mfrow = c(1,1))
+summary(tal)
+tal.table <- data.frame(summary(tal)$p.table) # store in a table
+```
+
+
+Similarly, we can now fit our continuous model. We'll extract just the encounter distiributions where agriculture was present, and then use the proportion agriculture as the response variable. 
+
+```{r}
+ag.cont <- train[train$p.ag>0,]
+tga <- gam(p.ag ~ season + sex.d + age.diff.sc + s(x, y, bs="gp", k = 250), family = betar(link="logit"), data = ag.cont, method = "REML")
+par(mfrow = c(2,2))
+gam.check(tga)
+par(mfrow = c(1,1))
+summary(tga)
+tga.table <- data.frame(summary(tga)$p.table) # store in a table
+```
+
+
+With our fitted models, we can now predict our responses for our training dataset. Let's start with the binary predictions:
+
+```{r}
+## Binary presence/absence predictions
+agbin.predictions <- predict(tal, type = "link", newdata = test, se.fit = T)
+test$agbin.predictions <- plogis(agbin.predictions$fit)
+test$low <- plogis(agbin.predictions$fit - agbin.predictions$se.fit) # confidence intervals
+test$high <- plogis(agbin.predictions$fit + agbin.predictions$se.fit) 
+
+test <- test[order(test$agbin.predictions),] # order the predictions for visualization purposes
+test$seq <- seq(1, nrow(test))
+
+ggplot(test) +
+  geom_jitter(aes(x = seq, y = ag.bin), height = 0.01) +
+ geom_point(aes(x = seq, y = agbin.predictions), colour = "#0571b0") +
+  geom_ribbon(aes(x = seq, ymin = low, ymax = high), alpha = 0.2, fill = "#0571b0") +
+  ylab("Agricultural presence") + 
+  ggtitle("Logistic predictions (Agricultural)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank())
+```
+
+Our model seems to do reasonably well at predicting presence/absence of agricultural land use in encounter distributions. How about the proportion of agriculture, given that agriculture is present?
+
+```{r}
+test.nz <- test[test$p.ag>0,]
+agnz.predictions <- predict(tga, type = "link", newdata = test.nz, se.fit = T)
+test.nz$agnz.predictions <- plogis(agnz.predictions$fit)
+test.nz$low <- plogis(agnz.predictions$fit - agnz.predictions$se.fit) # confidence intervals
+test.nz$high <- plogis(agnz.predictions$fit + agnz.predictions$se.fit)
+
+test.nz$pred.resid <- test.nz$p.ag - test.nz$agnz.predictions # residuals
+
+## observed vs predicted
+px <- pretty(test.nz$p.ag) # get nice axis breaks
+py <- pretty(test.nz$agnz.predictions)
+pag1 <- ggplot(test.nz, aes(x = p.ag, y = agnz.predictions)) +
+  geom_abline(slope = 1) +
+  geom_point() + 
+  xlab("observed") + ylab("predicted") +
+  scale_x_continuous(limits = range(px), breaks = px) +
+  scale_y_continuous(limits = range(py), breaks = py) +
+  ggtitle("Non-zero predictions (Agricultural)") +
+  theme_bw()
+
+## predicted vs residuals
+px <- pretty(test.nz$agnz.predictions)
+py <- pretty(test.nz$pred.resid)
+pag2 <- ggplot(test.nz, aes(x = agnz.predictions, y = pred.resid)) +
+  geom_hline(yintercept = 0, color = "grey", linetype = "dashed") +
+  geom_point() + 
+  xlab("predicted") + ylab("residuals") +
+  scale_x_continuous(limits = range(px), breaks = px) +
+  scale_y_continuous(limits = range(py), breaks = py) +
+  ggtitle("Non-zero predictions (Agricultural)") +
+  theme_bw()
+
+
+ggarrange(pag1, pag2, labels = c("A", "B"))
+
+
+```
