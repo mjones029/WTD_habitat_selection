@@ -16,7 +16,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Introduction
 
-In this report, I'll demonstrate the general workflow for our analysis of encounter distributions. Encounter distributions are described in [Noonan et al. 2021](https://doi.org/10.1111/2041-210X.13597) *Methods in Ecology and Evolution.* They represent a probability distribution for the locations at which individuals were most likely to have encountered each other. We calculated seasonal encounter distributions for pairs of deer, and then evaluated the habitat composition of these distributions. Our aim was to determine if some habitats are are more favorable for encounters, depending on deer sex and season.
+In this report, I'll demonstrate the general workflow for our analysis of encounter distributions. Encounter distributions are described in [Noonan et al. 2021](https://doi.org/10.1111/2041-210X.13597) *Methods in Ecology and Evolution.* They represent a probability distribution for the locations at which individuals were most likely to have encountered each other. We calculated seasonal encounter distributions for pairs of deer, and then evaluated the habitat composition of these distributions. Our aim was to determine if some habitats were more favorable for encounters, depending on deer age, sex, and season.
 
 
 To demonstrate our approach, I'll start by loading the packages we'll need. I also always set my seed as standard practice (this makes randomization reproducible).
@@ -44,7 +44,7 @@ library(ggpubr)
 
 ## Encounter distribution estimation
 
-The approach - including code - for estimating encounter distributions is thoroughly documented in [Noonan et al. 2021](https://doi.org/10.1111/2041-210X.13597). Furthermore, the methods are easily implemented in R with the *ctmm* package; in particular, the encounter() function. We therefore direct interested users to these resources; referring to the original sources is important for ensuring users understand the underlying methods before applying them to their own data. Nothing in our approach was novel, as we closely followed the code provided by Noonan et al.
+The approach - including code - for estimating encounter distributions is thoroughly documented in [Noonan et al. 2021](https://doi.org/10.1111/2041-210X.13597). Furthermore, the methods are easily implemented in R with the *ctmm* package; in particular, the encounter() function. We therefore direct interested users to these resources; referring to the original sources is important for ensuring users understand the underlying methods before applying them to their own data. We also want to make sure Noonan et al. get proper credit for their excellent documentation! Nothing in our approach was novel, as we closely followed the code provided by Noonan et al.
 
 ## Extract land use within encounter distributions
 
@@ -78,7 +78,7 @@ Now, let's read in some static landscape data. We'll use level-1 land use classi
 ```{r load-landscape}
 wl <- rast("../Project_data/WiscLand2_level1.tif")
 class(wl)
-plot(wl)
+terra::plot(wl)
 ```
 
 I know that my land cover and movement data are in the same coordinate reference system (CRS). However, interested users should always ensure this with their own data, especially if they are downloading landscape data from different sources.  
@@ -134,19 +134,19 @@ We'll now use our "proportion land use type" as a response variable in models ai
 
 Some column names are self-explanatory, but others less so:  
 
-X1/X2 = IDs of the two individuals that are part of a given encounter distribution  
+* X1/X2 = IDs of the two individuals that are part of a given encounter distribution  
 
-sex.d = Sexes of the pair (FF, MF, or MM)  
+* sex.d = Sexes of the pair (FF, MF, or MM)  
 
-age.diff = difference in ages of the pair (in integer years)  
+* age.diff = difference in ages of the pair (in integer years)  
 
-cent.x/cent.y = x and y coordinates of the encounter distribution centroid  
+* cent.x/cent.y = x and y coordinates of the encounter distribution centroid  
 
-ba = Bhattacharyya coefficient between the seasonal home ranges of the pair (quantifies home range overlap)  
+* ba = Bhattacharyya coefficient between the seasonal home ranges of the pair (quantifies home range overlap)  
 
-area.km.95 = area of the 95% isopleth of the encounter distribution  
+* area.km.95 = area of the 95% isopleth of the encounter distribution  
 
-p.corn, etc = proportion of the encounter distribution classified as a given habitat type  
+* p.corn, etc = proportion of the encounter distribution classified as a given habitat type  
 
 
 ```{r load-cde-dat}
@@ -172,8 +172,8 @@ We can see that we have quite a lot of encounter distributions that entirely lac
 
 In addition, we found that our models performed better when we excluded encounter distributions where there was very little home range overlap between the pair, as quantified by the Bhattacharyya coefficient. Let's go ahead and exclude encounter distributions with a Bhattacharyya coefficient ≤ 0.1, and create a new binary "is agricultural land use present or not" column.
 
-```{r}
-# remove individuals based on BA threshold
+```{r cut-off}
+# select individuals based on BA threshold
 cde.ba <- cde[cde$ba>0.1,]
 
 
@@ -185,7 +185,7 @@ cde.ba$ag.bin <- ifelse(cde.ba$p.ag>0, 1, 0)
 
 Before we fit our models, we need to do a little bit more data wrangling. We'll re-adjust the levels of our seasons and remove individuals with missing data. We'll scale and center our continuous predictor (age difference). We also need to rescale our centroids - these will feature in our model, and their large values can make models do funky things. 
 
-```{r}
+```{r data-wrangling}
 
 # adjust the order of the seasons
 cde.ba$season <- factor(cde.ba$season, levels = c("fa", "pf", "br", "nb"))
@@ -206,7 +206,7 @@ cde.ba$y <- cde.ba$cent.y/(10e4)
 
 Next, we'll split our data into training and testing data. We'll fit our two models (binary and continuous) to the training data, and then review our model performance with the test data.
 
-```{r}
+```{r train-test}
 # training versus testing datasets
 set.seed(250) # for reproducibility
 training.ids <- sample(1:nrow(cde.ba), size = floor(0.9*nrow(cde.ba)), replace = F) # 90% training
@@ -217,10 +217,9 @@ train <- cde.ba[training.ids,]
 ```
 
 
-Now that we have our data all set up, we can start by fitting our first GAM. We'll do the binary model first. This will use ALL the data in our training set, and the response variable is 0/1 for absence or presence of agriculture in encounter distributions, respectively. We account for spatial patterns in the data with the s() term in the model. The gam.check() function gives us some info for checking our model, and is part of how we arrived at the number of knots (k = 150, here) we used.  
+Now that we have our data all set up, we can start by fitting our first GAM. We'll do the binary model first. This will use all the data in our training set, and the response variable is 0/1 for absence or presence of agriculture in encounter distributions, respectively. We account for spatial patterns in the data with the s() term in the model. The gam.check() function gives us some info for checking our model, and is part of how we arrived at the number of knots (k = 150, here) we used. Our k value may still be too low, but our other model checking and predictions looked ok, with diminishing returns for increasing k.
 
-```{r}
-
+```{r binary-gam}
 ### Binary spatial GAM
 tal <- gam(ag.bin ~ season + sex.d + age.diff.sc + s(x, y, bs="gp", k =150), family = binomial(link = "logit"), data = train, method = "REML")
 par(mfrow = c(2,2))
@@ -233,7 +232,7 @@ tal.table <- data.frame(summary(tal)$p.table) # store in a table
 
 Similarly, we can now fit our continuous model. We'll extract just the encounter distiributions where agriculture was present, and then use the proportion agriculture as the response variable. 
 
-```{r}
+```{r continuous-gam}
 ag.cont <- train[train$p.ag>0,]
 tga <- gam(p.ag ~ season + sex.d + age.diff.sc + s(x, y, bs="gp", k = 250), family = betar(link="logit"), data = ag.cont, method = "REML")
 par(mfrow = c(2,2))
@@ -246,7 +245,7 @@ tga.table <- data.frame(summary(tga)$p.table) # store in a table
 
 With our fitted models, we can now predict our responses for our training dataset. Let's start with the binary predictions:
 
-```{r}
+```{r binary-predictions}
 ## Binary presence/absence predictions
 agbin.predictions <- predict(tal, type = "link", newdata = test, se.fit = T)
 test$agbin.predictions <- plogis(agbin.predictions$fit)
@@ -268,7 +267,7 @@ ggplot(test) +
 
 Our model seems to do reasonably well at predicting presence/absence of agricultural land use in encounter distributions. How about the proportion of agriculture, given that agriculture is present?
 
-```{r}
+```{r continuous-predictions}
 test.nz <- test[test$p.ag>0,]
 agnz.predictions <- predict(tga, type = "link", newdata = test.nz, se.fit = T)
 test.nz$agnz.predictions <- plogis(agnz.predictions$fit)
@@ -305,4 +304,17 @@ pag2 <- ggplot(test.nz, aes(x = agnz.predictions, y = pred.resid)) +
 ggarrange(pag1, pag2, labels = c("A", "B"))
 
 
+```
+
+Our continuous predictions look fairly reasonable, especially as compared to when using the full dataset (not shown here, but see the supplementary materials for the manuscript).  
+
+We repeat this same process for our other habitat classifications (forest and grass/pasture). And that's it!
+
+## Wrap up
+
+I didn't show fitting models with different Bhattacharyya coefficient cut-offs, but the process is identical. Results of these models are given in the accompanying manuscript's supplementary materials, and clearly show reduced predictive performance when using lower cut-offs.  
+
+I'll just close by providing session info:
+```{r session-info}
+sessionInfo()
 ```
