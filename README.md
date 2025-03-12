@@ -1,7 +1,13 @@
 # WTD_habitat_selection
-Repository for representative code replicating analysis in the manuscript, "White-tailed deer habitat use and implications for chronic wasting disease transmission."  
+This repository contains representative code for key analyses in the manuscript, "White-tailed deer habitat use and implications for chronic wasting disease transmission."  
 
-Where possible, I have included code as RMarkdown scripts with HTML outputs so users can see analyses in context. The data for this manuscript is not publicly available*, so the HTML files help document methods in light of this.
+All code includes RMarkdown scripts with HTML outputs so users can see analyses in context. The data for this manuscript is not publicly available*, so the HTML files help document methods in light of this.  
+
+To view an RMarkdown report HTML, click on the report of interest within the "Markdown_reports" folder. Within the page for that report, click on the download button highlighted by the red arrow in the below picture:  
+![](./Images/download_image.png)
+
+
+Once downloaded, just click on the downloaded file and the HTML should appear in your web browser.  
 
 ### What's inlcuded in this repository:
 
@@ -9,7 +15,7 @@ Where possible, I have included code as RMarkdown scripts with HTML outputs so u
 2. Activity pattern analysis: **Activity_patterns**
 3. iSSF analysis, including rolling occurrence distributions for neighbors: **iSSF_analysis**
 4. Used-habitat calibration plots: **UHC_plots**
-5. Encounter distribution analysis
+5. Encounter distribution analysis: **Encounter_distribution_analysis**
 
 
 ### What's not included in this respository:
