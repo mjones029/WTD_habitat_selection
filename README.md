@@ -4,7 +4,7 @@ This repository contains representative code for key analyses in the manuscript,
 All code includes RMarkdown scripts with HTML outputs so users can see analyses in context. The data for this manuscript is not publicly available*, so the HTML files help document methods in light of this.  
 
 To view an RMarkdown report HTML, click on the report of interest within the "Markdown_reports" folder. Within the page for that report, click on the download button highlighted by the red arrow in the below picture:  
-![](./Images/download_image.png)
+![](https://drive.google.com/uc?id=1zqlxALx5Orj82GzpBGu5XqsHnbMaYvvd)
 
 
 Once downloaded, just click on the downloaded file and the HTML should appear in your web browser.  
