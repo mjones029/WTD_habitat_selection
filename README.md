@@ -1,6 +1,8 @@
 # WTD_habitat_selection
 This repository contains representative code for key analyses in the manuscript, "White-tailed deer habitat use and implications for chronic wasting disease transmission."  
 
+This repository is versioned and archived with Zenodo: [![DOI](https://zenodo.org/badge/753311967.svg)](https://doi.org/10.5281/zenodo.15041985)
+
 All code includes RMarkdown scripts with HTML outputs so users can see analyses in context. The data for this manuscript is not publicly available*, so the HTML files help document methods in light of this.  
 
 To view an RMarkdown report HTML, click on the report of interest within the "Markdown_reports" folder. Within the page for that report, click on the download button highlighted by the red arrow in the below picture:  
